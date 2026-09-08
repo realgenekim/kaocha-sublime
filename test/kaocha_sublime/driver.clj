@@ -3,9 +3,10 @@
             [kaocha.repl :as repl] [clojure.java.io :as io]
             [kaocha.plugin.run-receipt] [kaocha.plugin.affected]))
 (defn -main [& [mode root out since]]
-  (let [cfg (config/load-config
+  (let [cfg (config/merge-config (config/load-config nil)
              {:kaocha/tests [{:kaocha.testable/id :unit
                               :kaocha.testable/type :kaocha.type/clojure.test
+                              :kaocha/ns-patterns ["-test$"]
                               :kaocha/source-paths [(str root "/src")]
                               :kaocha/test-paths [(str root "/test")]}]
               :kaocha/plugins [:kaocha.plugin/filter :kaocha.plugin/capture-output

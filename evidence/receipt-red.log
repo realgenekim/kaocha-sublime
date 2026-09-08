@@ -1,0 +1,6 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+Syntax error compiling at (kaocha/plugin/run_receipt.clj:107:66).
+No such namespace: ProcessHandle
+
+Full report at:
+/var/tmp/forge/clojure-7826843209498213205.edn

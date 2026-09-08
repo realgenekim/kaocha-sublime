@@ -1,0 +1,2 @@
+PASS SIGKILL exact JVM pid 969952 : one tmp, zero edn
+PASS concurrent isolated JVMs: distinct ids, totals, separate complete markers
