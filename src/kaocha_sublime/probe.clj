@@ -27,6 +27,10 @@
                others (remove #{suite} (map :kaocha.testable/id (:kaocha/tests cfg)))
                cfg (-> cfg
                        (assoc ::receipt/probe-namespaces namespaces
+                              ;; INTENT: AGENT-REQUESTED-SCOPE-020
+                              ::receipt/probe-targets targets
+                              ::receipt/configured-skip (:kaocha.filter/skip cfg)
+                              ::receipt/probe-skipped-suites (vec others)
                               :kaocha.filter/focus (mapv keyword (if (seq tests) tests targets)))
                        (update :kaocha.filter/skip into others))]
            (doseq [path (distinct (mapcat #(concat (:kaocha/source-paths %) (:kaocha/test-paths %))

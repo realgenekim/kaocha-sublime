@@ -176,6 +176,19 @@
   (nullable? #(and (map? %) (= #{:selected :total} (set (keys %)))
                    (uint? (:selected %)) (uint? (:total %)) (<= (:selected %) (:total %))) x))
 
+;; INTENT: AGENT-REQUESTED-SCOPE-020
+(defn- scope? [x]
+  (and (map? x) (= #{:kind :requested} (set (keys x)))
+       (vector? (:requested x))
+       (every? #(and (encoded-within? % 2048) (not (str/blank? %))) (:requested x))
+       (case (:kind x)
+         :full (empty? (:requested x))
+         :probe (boolean (seq (:requested x)))
+         :namespaces true
+         false)))
+
+(def scope-keys #{:scope :closure_basis :skipped_by_focus})
+
 ;; INTENT: AGENT-PARENT-OUTCOME-019
 (def unknown-parent-outcome {:outcome :unknown :fail nil :error nil})
 
@@ -190,7 +203,8 @@
 (defn valid-record? [kind r]
   (and (= 1 (:v r))
        (= (cond-> (record-keys kind)
-            (and (= kind :done) (true? (:auto_followup r))) (conj :parent_outcome))
+            (and (= kind :done) (true? (:auto_followup r))) (conj :parent_outcome)
+            (and (= kind :done) (contains? r :scope)) (into scope-keys))
           (set (keys r)))
        (every? #(nullable? (fn [s] (and (string? s) (boolean (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]{0,199}" s)))) %)
                (map r [:id :token :parent]))
@@ -219,6 +233,10 @@
                                   (every? #{:context :expr :expected :actual :diff} %))
                             (map r [:truncated :unavailable])))
          :done (and (contains? #{:pass :fail :error :incomplete} (:outcome r))
+                    (or (not (contains? r :scope))
+                        (and (scope? (:scope r))
+                             (= :discovered-namespaces-v1 (:closure_basis r))
+                             (uint? (:skipped_by_focus r))))
                     (contains? #{:complete :partial :unknown} (:coverage r))
                     (every? #(nullable? uint? %) (map r [:tests :assertions :pass :fail :error :pending :skipped]))
                     (or (every? nil? (map r [:assertions :pass :fail :error]))
@@ -270,4 +288,8 @@
            (select-keys (merge {:tests nil :assertions nil :pass nil :fail nil :error nil :pending nil :skipped nil}
                                totals) [:tests :assertions :pass :fail :error :pending :skipped]))
       (:auto-followup? receipt)
-      (assoc :parent_outcome (get receipt :parent-outcome unknown-parent-outcome)))))
+      (assoc :parent_outcome (get receipt :parent-outcome unknown-parent-outcome))
+      ;; Legacy replay preserves absence rather than inventing a convention.
+      (contains? receipt :scope)
+      (assoc :scope (:scope receipt) :closure_basis (:closure-basis receipt)
+             :skipped_by_focus (get-in receipt [:totals :skipped-by-focus])))))

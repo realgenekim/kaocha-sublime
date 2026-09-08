@@ -118,7 +118,10 @@
    :ears "A supported probe shall report completeness of its explicit requested targets, name that scope, and count focus omissions separately from other skips; a full-scope token shall never accept a probe."
    :misreadings ["Complete probe means full gate." "A Var probe covers every test in its namespace."]
    :boundaries ["Namespace and Var targets" "Missing Var" "Declared exclusions" "1/1 closure"]
-   :tests [:probe-scope-separates-focus-from-declared-skips :full-follow-refuses-probe-even-with-equal-denominators :a-missing-var-among-valid-probe-targets-is-incomplete]
+   :tests [:probe-scope-separates-focus-from-declared-skips :full-follow-refuses-probe-even-with-equal-denominators :a-missing-var-among-valid-probe-targets-is-incomplete
+           :scope-extension-is-validated-without-inventing-legacy-evidence :legacy-probe-done-cannot-satisfy-full-follow
+           :probe-suite-omissions-are-not-declared-configuration :explicit-id-skips-are-declared-and-auditable
+           :fail-fast-omissions-inside-a-probe-are-not-focus-skips]
    :rationale "Fable requested-scope ruling, item 4b defects, records 50db3993."}
   {:id :AGENT-LOAD-REASON-021 :status :active
    :ears "A probe reload failure shall retain FAIL kind=load and close with STATUS refused/load-error, reserving protocol-error for record failures."

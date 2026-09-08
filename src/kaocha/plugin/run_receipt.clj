@@ -8,6 +8,7 @@
             [kaocha.hierarchy :as hierarchy]
             [kaocha.plugin :refer [defplugin]]
             [kaocha.plugin.capture-output :as capture]
+            [kaocha.plugin.filter :as filter]
             [kaocha.result :as result]
             [kaocha.testable :as testable]
             [kaocha.watch :as watch]
@@ -325,15 +326,33 @@
 ;; Kaocha 1.91's test-seq-with-skipped recurses through test-seq, which drops
 ;; nested skips. Preserve the complete tree and inherited declared exclusions.
 ;; INTENT: AGENT-DECLARED-GATE-015
+(defn- matches-filter? [node ids metadata]
+  (and (:kaocha.testable/id node) (filter/matches? node ids metadata)))
+
+;; INTENT: AGENT-REQUESTED-SCOPE-020
 (defn- coverage-tree
-  ([node] (coverage-tree node [] false []))
-  ([node rules skipped? matched]
-   (let [rules (vec (distinct (concat rules (:kaocha.filter/skip-meta node))))
+  ([node]
+   (coverage-tree node {} false [] [] false (set (::probe-skipped-suites node))))
+  ([node inherited skipped? matched-meta matched-ids outside-suite? probe-suites]
+   (let [local (cond-> (filter/filters node)
+                 (contains? node ::configured-skip) (assoc :skip (::configured-skip node)))
+         rules (filter/merge-filters inherited local)
+         matched-meta (vec (distinct (concat matched-meta
+                                    (filter #(get (:kaocha.testable/meta node) (keyword %)) (:skip-meta rules)))))
+         matched-ids (vec (distinct (concat matched-ids
+                                   (filter #(matches-filter? node [%] []) (:skip rules)))))
          skipped? (or skipped? (:kaocha.testable/skip node))
-         matched (vec (distinct (concat matched (filter #(get (:kaocha.testable/meta node) (keyword %)) rules))))]
+         outside-suite? (or outside-suite? (contains? probe-suites (:kaocha.testable/id node)))
+         focused? (matches-filter? node (:focus rules) (:focus-meta rules))
+         outside-focus? (or outside-suite?
+                            (and (or (seq (:focus rules)) (seq (:focus-meta rules))) (not focused?)))
+         rules (if focused? (dissoc rules :focus :focus-meta) rules)]
      (assoc node ::skipped? (boolean skipped?)
-                 ::declared-skip (when skipped? matched)
-                 ::children (mapv #(coverage-tree % rules skipped? matched) (children node))))))
+                 ::outside-focus? (boolean outside-focus?)
+                 ::declared-skip (when skipped? matched-meta)
+                 ::declared-skip-ids (when skipped? matched-ids)
+                 ::children (mapv #(coverage-tree % rules skipped? matched-meta matched-ids outside-suite? probe-suites)
+                                  (children node))))))
 
 (defn- coverage-nodes [tree] (tree-seq #(seq (::children %)) ::children tree))
 
@@ -341,34 +360,62 @@
   (let [nodes (coverage-nodes (coverage-tree r))
         namespaces (filter #(= :kaocha.type/ns (:kaocha.testable/type %)) nodes)
         leaves-of #(filter hierarchy/leaf? (coverage-nodes %))
-        declared? #(seq (::declared-skip %))
+        declared? #(or (seq (::declared-skip %)) (seq (::declared-skip-ids %)))
         selected (filter #(or (declared? %)
                               (and (not (::skipped? %))
                                    (or (contains? % :kaocha.result/tests)
                                        (every? declared? (leaves-of %))))) namespaces)
-        complete? (fn [n]
+        complete? (fn [n probe?]
                     (let [leaves (leaves-of n)]
                       (and (not (:kaocha.testable/load-error n))
                            (every? #(and (not (:kaocha.testable/load-error %))
                                          (or (declared? %)
+                                             (and probe? (::outside-focus? %))
                                              (and (not (::skipped? %))
                                                   (pos? (:kaocha.result/count % 0))
                                                   (zero? (:kaocha.result/pending % 0))))) leaves))))
-        full (filter complete? selected)
+        full (filter #(complete? % false) selected)
+        probe? (contains? r ::probe-targets)
+        requested (:kaocha.filter/focus r)
+        required-complete? (if probe?
+                             (every? (fn [target]
+                                       (let [matches (filter #(matches-filter? % [target] []) nodes)]
+                                         (and (seq matches) (every? #(complete? % true) matches))))
+                                     requested)
+                             (= (count full) (count selected)))
         leaves (filter hierarchy/leaf? nodes)
         executed (filter #(and (not (::skipped? %)) (pos? (:kaocha.result/count % 0))
                                (zero? (:kaocha.result/pending % 0))) leaves)
-        pending (filter #(and (not (::skipped? %)) (pos? (:kaocha.result/pending % 0))) leaves)]
-    {:closure (when (seq namespaces) {:selected (count selected) :total (count namespaces)})
+        pending (filter #(and (not (::skipped? %)) (pos? (:kaocha.result/pending % 0))) leaves)
+        unexecuted (filter #(or (::skipped? %) (and (zero? (:kaocha.result/count % 0))
+                                                   (zero? (:kaocha.result/pending % 0)))) leaves)
+        declared-skips (filter declared? unexecuted)
+        focus-skips (filter #(and (not (declared? %)) (::outside-focus? %)) unexecuted)]
+    {;; INTENT: AGENT-CLOSURE-BASIS-022
+     :closure-basis :discovered-namespaces-v1
+     :scope (cond probe? {:kind :probe :requested (mapv str (::probe-targets r))}
+                  (= (count selected) (count namespaces)) {:kind :full :requested []}
+                  :else {:kind :namespaces :requested (mapv (comp str :kaocha.ns/name) selected)})
+     :focus-rules {:focus (vec (:kaocha.filter/focus r))
+                   :focus-meta (vec (:kaocha.filter/focus-meta r))
+                   :skip-suites (vec (::probe-skipped-suites r))}
+     :closure (when (seq namespaces) {:selected (count selected) :total (count namespaces)})
      :executed-namespaces (mapv (comp str :kaocha.ns/name) selected)
      :partial-namespaces (mapv (comp str :kaocha.ns/name) (remove #(contains? (set (map :kaocha.testable/id full)) (:kaocha.testable/id %)) selected))
-     :coverage (cond (empty? selected) :unknown (= (count full) (count selected)) :complete :else :partial)
-     :skip-rules (mapv (fn [n] {:id (:kaocha.testable/id n) :skip-meta (vec (:kaocha.filter/skip-meta n))})
-                       (filter #(seq (:kaocha.filter/skip-meta %)) nodes))
-     :declared-skips (mapv (fn [n] {:id (:kaocha.testable/id n) :skip-meta (::declared-skip n)})
-                           (filter declared? leaves))
+     :coverage (cond (empty? selected) :unknown required-complete? :complete :else :partial)
+     :skip-rules (mapv (fn [n] (cond-> {:id (:kaocha.testable/id n) :skip-meta (vec (:kaocha.filter/skip-meta n))}
+                               (seq (:kaocha.filter/skip n)) (assoc :skip (vec (:kaocha.filter/skip n)))))
+                       (filter #(or (seq (:kaocha.filter/skip-meta %)) (seq (:kaocha.filter/skip %)))
+                               (map #(cond-> % (contains? % ::configured-skip)
+                                       (assoc :kaocha.filter/skip (::configured-skip %))) nodes)))
+     :declared-skips (mapv (fn [n] (cond-> {:id (:kaocha.testable/id n) :skip-meta (::declared-skip n)}
+                                    (seq (::declared-skip-ids n)) (assoc :skip (::declared-skip-ids n))))
+                           declared-skips)
      :executed-tests (count executed)
-     :skipped-tests (- (count leaves) (count executed) (count pending))}))
+     :skipped-tests (count declared-skips)
+     :skipped-by-focus (count focus-skips)
+     :unexecuted-tests (- (count leaves) (count executed) (count pending)
+                          (count declared-skips) (count focus-skips))}))
 
 ;; INTENT: AGENT-PARENT-OUTCOME-019
 (defn- parent-evidence [path]
@@ -406,14 +453,15 @@
                   (:events state)
                   (merge (select-keys state [:workspace :session :generation :candidate :manifest
                                               :observed :file-stamps :mode :events :heap :classpath-generation])
-                         (dissoc coverage :executed-tests :skipped-tests)
+                         (dissoc coverage :executed-tests :skipped-tests :skipped-by-focus)
                          {:schema 1 :identity identity :diagnostic diagnostic
                           :identity-proof (select-keys @(:attestation state)
                                                        [:base-valid? :changed-covered? :reload-stable? :reload-observed
                                                         :scheduled :changed :finish-observed :disk-stable? :file-stamps-stable? :classpath-stable? :configuration-valid?])
                           :process-start (:process-start (active-record state))
                           :failure-budget @(:budget state) :failures @(:failures state)
-                          :totals (assoc (totals r) :tests (:executed-tests coverage) :skipped (:skipped-tests coverage))}
+                          :totals (assoc (totals r) :tests (:executed-tests coverage) :skipped (:skipped-tests coverage)
+                                                   :skipped-by-focus (:skipped-by-focus coverage))}
                          (if auto-followup? (parent-evidence followup-of)
                              {:parent nil :parent-sha256 nil}))
                   git-sha (assoc :git-sha git-sha)

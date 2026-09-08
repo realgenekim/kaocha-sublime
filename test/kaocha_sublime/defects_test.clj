@@ -126,11 +126,14 @@
     (is (= 2 (get-in r [:totals :tests])))
     (is (= 1 (get-in r [:totals :skipped])))
     (is (= "pass" (:outcome done)))
+    (is (= {:kind "full" :requested []} (:scope done)))
+    (is (= "discovered-namespaces-v1" (:closure_basis done)))
+    (is (= 0 (:skipped_by_focus done)))
     (is (= [{:id :declared-gate-test/configured-skip :skip-meta [:ci]}] (:declared-skips r)))
     (is (= [{:id :unit :skip-meta [:e2e :slow :pg :ci]}] (:skip-rules r)))
     ;; Identity is separately proved by a cold/watch run; isolate coverage here.
     (let [token (candidate/mark! (str dir "/runs") [] {:kind :full})
-          r (assoc r :identity :exact)]
+          r (assoc r :identity :exact :mode :gate)]
       (kaocha-sublime.agent-test/publish-token! (str dir "/runs") r)
       (is (= 0 (:exit (status/observe {:dir (str dir "/runs") :token token})))))))
 
@@ -141,7 +144,8 @@
         r (candidate/read-edn (:kaocha.plugin.run-receipt/path result))]
     (is (= :partial (:coverage r)))
     (is (= :incomplete (protocol/outcome (:totals r) (:coverage r))))
-    (is (= 2 (get-in r [:totals :skipped])))))
+    (is (= 1 (get-in r [:totals :skipped])))
+    (is (= 1 (get-in r [:totals :skipped-by-focus])))))
 
 ;; INTENT-TEST: AGENT-REFUSAL-ID-016
 (deftest heap-refusal-honors-launcher-id
@@ -304,15 +308,21 @@
         (is (= "discovered-namespaces-v1" (:closure_basis done)))
         (is (= (if (= tests 1) ["declared-gate-test"] []) (:partial-namespaces r))
             "Var probes must not satisfy namespace FOLLOW")
-        ))))
+        (let [runs (str dir "/runs")
+              token (candidate/mark! runs [] {:kind :namespaces :namespaces ["declared-gate-test"]})]
+          ;; Isolate scope acceptance from the separately tested image attestation.
+          (kaocha-sublime.agent-test/publish-token! runs (assoc r :identity :exact))
+          (is (= (if (= tests 1) 2 0) (:exit (status/observe {:dir runs :token token})))))))))
 
 ;; INTENT-TEST: AGENT-REQUESTED-SCOPE-020
 (deftest full-follow-refuses-probe-even-with-equal-denominators
   (let [{:keys [dir record] :as opts} (kaocha-sublime.agent-test/token-fixture)]
     (kaocha-sublime.agent-test/publish-token!
-      dir (assoc record :mode :probe :scope {:kind :probe :requested ["a-test"]}
-                        :closure-basis :discovered-namespaces-v1))
-    (let [answer (status/observe opts)]
+      dir (-> record
+              (assoc :mode :probe :scope {:kind :probe :requested ["a-test"]}
+                     :closure-basis :discovered-namespaces-v1)
+              (assoc-in [:totals :skipped-by-focus] 0)))
+    (let [answer (status/follow-result (assoc opts :follow true :timeout 0.0))]
       (is (= 2 (:exit answer)))
       (is (= :uncovered (get-in answer [:record :state])))
       (is (= :scope-missing (get-in answer [:record :reason]))))))
@@ -324,3 +334,68 @@
         r (candidate/read-edn (:path answer))]
     (is (= 2 (:exit answer)))
     (is (= :partial (:coverage r)))))
+
+;; INTENT-TEST: AGENT-REQUESTED-SCOPE-020
+;; INTENT-TEST: AGENT-CLOSURE-BASIS-022
+(deftest scope-extension-is-validated-without-inventing-legacy-evidence
+  (let [{:keys [record]} (kaocha-sublime.agent-test/token-fixture)
+        legacy (protocol/done-record record "/tmp/legacy.edn" (apply str (repeat 64 "a")))
+        current (assoc legacy :scope {:kind :probe :requested ["a-test/one"]}
+                              :closure_basis :discovered-namespaces-v1 :skipped_by_focus 1)]
+    (is (protocol/valid-record? :done legacy))
+    (is (not-any? #(contains? legacy %) [:scope :closure_basis :skipped_by_focus]))
+    (is (protocol/valid-record? :done current))
+    (doseq [bad [(dissoc current :scope) (dissoc current :closure_basis)
+                 (dissoc current :skipped_by_focus)
+                 (assoc current :closure_basis :requested-targets)
+                 (assoc current :skipped_by_focus -1)
+                 (assoc current :scope {:kind :probe :requested []})
+                 (assoc current :scope {:kind :full :requested ["a-test"]})
+                 (assoc current :scope {:kind :probe :requested [nil]})]]
+      (is (not (protocol/valid-record? :done bad))))))
+
+;; INTENT-TEST: AGENT-REQUESTED-SCOPE-020
+(deftest legacy-probe-done-cannot-satisfy-full-follow
+  (let [{:keys [dir record] :as opts} (kaocha-sublime.agent-test/token-fixture)]
+    (kaocha-sublime.agent-test/publish-token! dir (assoc record :mode :probe))
+    (let [answer (status/follow-result (assoc opts :follow true :timeout 0.0))]
+      (is (= 2 (:exit answer)))
+      (is (= :scope-missing (get-in answer [:record :reason]))))))
+
+;; INTENT-TEST: AGENT-REQUESTED-SCOPE-020
+(deftest probe-suite-omissions-are-not-declared-configuration
+  (let [cfg (skip-fixture (temp-dir))
+        cfg (update cfg :kaocha/tests conj (assoc (first (:kaocha/tests cfg)) :kaocha.testable/id :other))
+        answer (probe-run '[declared-gate-test] cfg)
+        r (candidate/read-edn (:path answer))]
+    (is (= 0 (:exit answer)))
+    (is (= {:selected 1 :total 1} (:closure r)) "Undiscovered suites do not invent groups")
+    (is (= [:other] (get-in r [:focus-rules :skip-suites])))
+    (is (not-any? #(some #{:other} (:skip %)) (:skip-rules r)))
+    (is (= 2 (get-in r [:totals :tests])))
+    (is (= 1 (get-in r [:totals :skipped])))
+    (is (= 0 (get-in r [:totals :skipped-by-focus])))))
+
+;; INTENT-TEST: AGENT-REQUESTED-SCOPE-020
+(deftest explicit-id-skips-are-declared-and-auditable
+  (let [cfg (assoc (skip-fixture (temp-dir)) :kaocha.filter/skip [:declared-gate-test/another-green])
+        r (candidate/read-edn (:kaocha.plugin.run-receipt/path (run! cfg)))]
+    (is (= :complete (:coverage r)))
+    (is (= 1 (get-in r [:totals :tests])))
+    (is (= 2 (get-in r [:totals :skipped])))
+    (is (= 0 (get-in r [:totals :skipped-by-focus])))
+    (is (some #(= [:declared-gate-test/another-green] (:skip %)) (:declared-skips r)))))
+
+;; INTENT-TEST: AGENT-REQUESTED-SCOPE-020
+(deftest fail-fast-omissions-inside-a-probe-are-not-focus-skips
+  (let [dir (temp-dir) cfg (skip-fixture dir)
+        file (str dir "/test/fail_fast_scope_test.clj")]
+    (io/delete-file (str dir "/test/declared_gate_test.clj"))
+    (spit file "(ns fail-fast-scope-test (:require [clojure.test :refer [deftest is]]))\n(deftest first-red (is false))\n(deftest later (is true))\n")
+    (let [answer (probe-run '[fail-fast-scope-test] (assoc cfg :kaocha/fail-fast? true))
+          r (candidate/read-edn (:path answer))]
+      (is (= 1 (:exit answer)))
+      (is (= :partial (:coverage r)))
+      (is (= 0 (get-in r [:totals :skipped])))
+      (is (= 0 (get-in r [:totals :skipped-by-focus])))
+      (is (= 1 (:unexecuted-tests r))))))

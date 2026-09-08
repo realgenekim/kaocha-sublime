@@ -143,7 +143,10 @@
 (defn- token-covers? [token r]
   (let [{:keys [kind namespaces]} (:required-scope token)]
     (case kind
-      :full (and (= :complete (:coverage r))
+      ;; INTENT: AGENT-REQUESTED-SCOPE-020
+      :full (and (not= :probe (:mode r))
+                 (or (not (contains? r :scope)) (= :full (get-in r [:scope :kind])))
+                 (= :complete (:coverage r))
                  (some? (:closure r))
                  (= (get-in r [:closure :selected]) (get-in r [:closure :total])))
       :namespaces (and (seq namespaces)

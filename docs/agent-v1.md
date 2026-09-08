@@ -25,6 +25,12 @@ RUN-DONE   := common + outcome:(pass|fail|error|incomplete), tests:(uint|null),
               coverage:(complete|partial|unknown), wall_ms:uint, auto_followup:boolean,
               parent:(id|null), shown:uint, omitted:uint, receipt:absolute-path, sha256:hex64,
               parent_outcome:parent-result ONLY when auto_followup=true (required then)
+              New producer records also carry this group (all three or none):
+              scope:scope-object, skipped_by_focus:uint,
+              closure_basis:"discovered-namespaces-v1"
+scope-object := {"kind":(full|namespaces|probe),"requested":[string]}
+              full uses []; namespaces lists the selected namespace closure;
+              probe lists the caller's namespace/Var targets, in supplied order
 parent-result := {"outcome":(pass|fail|error|incomplete|unknown),
                   "fail":(uint|null),"error":(uint|null)}
               unknown requires null counts; known outcomes require numeric counts;
@@ -115,21 +121,56 @@ candidate identity before selecting the primary. Unknown or malformed evidence
 never produces exit 0. An unchanged completed result can satisfy multiple marks
 with the same content and scope, including marks made after completion.
 
-`coverage=complete` describes the selected namespace closure. A full-scope token
-additionally requires `closure.selected == closure.total`. Empty discovered
-namespace groups contribute to namespace closure but invent no executed tests.
-Pending tests do not execute, do not add assertions, and prevent a pass. The
-declared gate defines complete coverage: leaves excluded by the effective
-`:kaocha.filter/skip-meta` configuration do not reduce it. Receipts record
-`:skip-rules` (declaring node ID and metadata keys), `:declared-skips` (excluded
-leaf IDs and matching keys), and the separate `:totals :skipped` count. DONE's
-`skipped` includes all unexecuted non-pending leaves, including nested skips;
-only declared exclusions are exempt from coverage. Focused omissions, fail-fast
-omissions, load errors, and pending tests remain incomplete. Zero executed tests
-cannot pass even if every test was deliberately skipped.
-A namespace scope requires every non-excluded test in those
-namespaces; a Var-focused green cannot satisfy it. Exit 1 establishes an exact
-candidate's failure/error; it does not establish complete coverage.
+`coverage=complete` describes the scope named in the record. For the supported
+`probe/run` entrance, `scope={kind:"probe",requested:[...]}` preserves the caller's
+exact ordered targets. Source namespaces are reloaded; when test targets are also
+supplied, those test namespaces/Vars define the requested test scope. A namespace
+probe requires every non-excluded test in that namespace. A Var probe requires
+only its named tests, so focus omissions outside those targets do not make it
+incomplete. Missing targets, pending tests, load errors, and fail-fast omissions
+inside the requested scope still prevent completion. Zero executed tests cannot
+pass even if every requested test was deliberately skipped.
+
+Ordinary runner selection keeps namespace-level coverage: `scope.kind=full` when
+all discovered namespace groups are selected, or `namespaces` with the selected
+namespace names otherwise. Focused omissions *within* those namespaces remain
+incomplete. A full-scope FOLLOW token additionally requires a non-probe mode,
+`scope.kind=full` on new receipts, and `closure.selected == closure.total`.
+**A probe DONE never satisfies a full-scope token, even with closure 1/1.** A
+namespace token requires every non-excluded test in each requested namespace;
+`:partial-namespaces` therefore retains whole-namespace incompleteness even when
+a narrower Var probe is complete. Exit 1 establishes an exact candidate's
+failure/error; it does not establish complete coverage.
+
+`closure_basis="discovered-namespaces-v1"` fixes the counting convention:
+`total` counts all namespace groups present in Kaocha's discovery/result tree,
+including focus-omitted groups; `selected` counts evaluated groups and groups
+covered by declared exclusions. Groups are counted per suite, not deduplicated
+namespace names and not test Vars. Empty discovered groups count, but invent no
+executed tests. Suites skipped before discovery contribute no namespace groups
+or leaf counts; this is **not** a filesystem census of undiscovered suites.
+Changing focus from a namespace to one of its Vars does not rebase `total` onto
+the target list. Changes to this convention require a new `closure_basis` value.
+
+DONE's `skipped` now counts only unexecuted leaves excluded by declared
+`:kaocha.filter/skip-meta` or `:kaocha.filter/skip` rules. `skipped_by_focus` counts
+unexecuted leaves outside the effective focus, excluding declared skips so the
+two counts never overlap. Receipts preserve `:skip-rules`, `:declared-skips`
+(leaf IDs and matching metadata keys and/or skip IDs), and `:focus-rules`
+(effective root focus, focus metadata, and suites omitted by the probe adapter).
+They also retain `:unexecuted-tests` for omissions explained by neither declared
+exclusion nor focus, such as fail-fast. Such required omissions prevent complete
+coverage; they are not relabelled as configured skips. Counts cover discovered
+leaves only. The EDN spellings are `:scope`, `:closure-basis`, and
+`:totals :skipped-by-focus`.
+
+The scope/basis/focus-count group is additive in v1 but must be accepted by strict
+key validators before repinning. Its absence identifies legacy records: their
+closure convention is unknown and their `skipped` is the old combined count.
+Replay preserves that absence; never backfill a convention or infer full scope
+from a legacy probe's 1/1 denominator. Consumers such as `coldstart-grade` must
+register all three keys and `load-error`, validate the group together, and check
+scope/mode as well as coverage and closure before accepting a full gate.
 
 The manifest includes configured source/test/resource roots, additional affected
 paths, configuration files, and directory entries on the classpath. Classpath
