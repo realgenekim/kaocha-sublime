@@ -1,7 +1,6 @@
 (ns kaocha-sublime.driver
   (:require [kaocha.api :as api] [kaocha.config :as config]
-            [kaocha.repl :as repl] [clojure.java.io :as io]
-            [kaocha.plugin.run-receipt] [kaocha.plugin.affected]))
+            [kaocha.repl :as repl] [clojure.java.io :as io]))
 (defn -main [& [mode root out since]]
   (let [cfg (config/merge-config (config/load-config nil)
              {:kaocha/tests [{:kaocha.testable/id :unit

@@ -1,0 +1,80 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+
+Testing kaocha-sublime.plugins-test
+
+FAIL in (hash-preserves-edn-collection-types) (plugins_test.clj:18)
+expected: (not= (receipt/config-hash {:x #{1 2}}) (receipt/config-hash {:x [1 2]}))
+  actual: (not (not= "ba2de7a45de3ac3e6c38f4af08a97d345c1f46cb8f62c54b0ed3aa77cded0cab" "ba2de7a45de3ac3e6c38f4af08a97d345c1f46cb8f62c54b0ed3aa77cded0cab"))
+
+Testing kaocha-sublime.receipt-test
+
+ERROR in (extended-failure-events-and-arbitrary-messages-remain-edn) (EdnReader.java:801)
+Uncaught exception, not in assertion.
+expected: nil
+  actual: java.lang.RuntimeException: No reader function for tag object
+ at clojure.lang.EdnReader$TaggedReader.readTagged (EdnReader.java:801)
+    clojure.lang.EdnReader$TaggedReader.invoke (EdnReader.java:783)
+    clojure.lang.EdnReader$DispatchReader.invoke (EdnReader.java:549)
+    clojure.lang.EdnReader.readDelimitedList (EdnReader.java:757)
+    clojure.lang.EdnReader$MapReader.invoke (EdnReader.java:680)
+    clojure.lang.EdnReader.readDelimitedList (EdnReader.java:757)
+    clojure.lang.EdnReader$VectorReader.invoke (EdnReader.java:672)
+    clojure.lang.EdnReader.readDelimitedList (EdnReader.java:757)
+    clojure.lang.EdnReader$MapReader.invoke (EdnReader.java:680)
+    clojure.lang.EdnReader.read (EdnReader.java:145)
+    clojure.lang.EdnReader.read (EdnReader.java:111)
+    clojure.lang.EdnReader.readString (EdnReader.java:67)
+    clojure.edn$read_string.invokeStatic (edn.clj:46)
+    clojure.edn$read_string.invokeStatic (edn.clj:37)
+    clojure.edn$read_string.invoke (edn.clj:37)
+    kaocha_sublime.receipt_test$fn__4736.invokeStatic (receipt_test.clj:70)
+    kaocha_sublime.receipt_test/fn (receipt_test.clj:63)
+    clojure.test$test_var$fn__9894.invoke (test.clj:717)
+    clojure.test$test_var.invokeStatic (test.clj:717)
+    clojure.test$test_var.invoke (test.clj:708)
+    clojure.test$test_vars$fn__9920$fn__9925.invoke (test.clj:735)
+    clojure.test$default_fixture.invokeStatic (test.clj:687)
+    clojure.test$default_fixture.invoke (test.clj:683)
+    clojure.test$test_vars$fn__9920.invoke (test.clj:735)
+    clojure.test$default_fixture.invokeStatic (test.clj:687)
+    clojure.test$default_fixture.invoke (test.clj:683)
+    clojure.test$test_vars.invokeStatic (test.clj:731)
+    clojure.test$test_all_vars.invokeStatic (test.clj:737)
+    clojure.test$test_ns.invokeStatic (test.clj:758)
+    clojure.test$test_ns.invoke (test.clj:743)
+    clojure.core$map$fn__5954.invoke (core.clj:2772)
+    clojure.lang.LazySeq.force (LazySeq.java:50)
+    clojure.lang.LazySeq.realize (LazySeq.java:89)
+    clojure.lang.LazySeq.seq (LazySeq.java:106)
+    clojure.lang.Cons.next (Cons.java:41)
+    clojure.lang.RT.boundedLength (RT.java:1810)
+    clojure.lang.RestFn.applyTo (RestFn.java:133)
+    clojure.core$apply.invokeStatic (core.clj:669)
+    clojure.test$run_tests.invokeStatic (test.clj:768)
+    clojure.test$run_tests.doInvoke (test.clj:768)
+    clojure.lang.RestFn.invoke (RestFn.java:439)
+    kaocha_sublime.test_runner$_main.invokeStatic (test_runner.clj:5)
+    kaocha_sublime.test_runner$_main.doInvoke (test_runner.clj:4)
+    clojure.lang.RestFn.invoke (RestFn.java:400)
+    clojure.lang.AFn.applyToHelper (AFn.java:152)
+    clojure.lang.RestFn.applyTo (RestFn.java:135)
+    clojure.lang.Var.applyTo (Var.java:707)
+    clojure.core$apply.invokeStatic (core.clj:667)
+    clojure.main$main_opt.invokeStatic (main.clj:515)
+    clojure.main$main_opt.invoke (main.clj:511)
+    clojure.main$main.invokeStatic (main.clj:665)
+    clojure.main$main.doInvoke (main.clj:617)
+    clojure.lang.RestFn.applyTo (RestFn.java:140)
+    clojure.lang.Var.applyTo (Var.j[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+ava:707)
+    clojure.main.main (main.java:40)
+
+Testing kaocha-sublime.affected-test
+
+Ran 11 tests containing 38 assertions.
+1 failures, 1 errors.

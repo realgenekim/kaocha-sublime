@@ -59,3 +59,26 @@
   (is (= {:kaocha.result/count 0 :kaocha.result/pass 0 :kaocha.result/fail 0
           :kaocha.result/error 0 :kaocha.result/pending 0}
          (result/totals []))))
+
+(deftest extended-failure-events-and-arbitrary-messages-remain-edn
+  (let [dir (temp-dir)
+        cfg (-> (fixture-config dir)
+                (assoc-in [:kaocha/tests 0 :kaocha/test-paths] ["fixtures/edge/test"]))
+        r (atom nil)]
+    (with-out-str (binding [clojure.test/*test-out* *out* clojure.test/*report-counters* nil]
+                    (reset! r (api/run cfg))))
+    (let [receipt (edn/read-string (slurp (:kaocha.plugin.run-receipt/path @r)))]
+      (is (= 2 (get-in receipt [:totals :fail])))
+      (is (= 2 (count (:failures receipt))))
+      (is (every? #(or (nil? (:message %)) (string? (:message %))) (:failures receipt))))))
+
+(deftest repl-printer-limits-cannot-truncate-receipts
+  (let [dir (temp-dir) r (atom nil)]
+    (with-out-str
+      (binding [clojure.test/*test-out* *out* clojure.test/*report-counters* nil
+                *print-length* 1 *print-level* 1 *print-readably* false]
+        (reset! r (api/run (fixture-config dir)))))
+    (let [receipt (edn/read-string (slurp (:kaocha.plugin.run-receipt/path @r)))]
+      (is (= 5 (get-in receipt [:totals :tests])))
+      (is (= 2 (count (:failures receipt))))
+      (is (string? (:config-hash receipt))))))

@@ -12,5 +12,5 @@ To create a configuration file using the current defaults and configuration file
 
 Testing kaocha-sublime.affected-test
 
-Ran 9 tests containing 36 assertions.
+Ran 12 tests containing 43 assertions.
 0 failures, 0 errors.

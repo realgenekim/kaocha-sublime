@@ -3,6 +3,7 @@
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
+            [kaocha.hierarchy :as hierarchy]
             [kaocha.plugin :refer [defplugin]]
             [kaocha.result :as result]
             [kaocha.testable :as testable])
@@ -14,20 +15,25 @@
 
 (def plugin-version "0.1.0-SNAPSHOT")
 
+(defn- edn-str [x]
+  (binding [*print-length* nil *print-level* nil *print-readably* true
+            *print-dup* false *print-meta* false]
+    (pr-str x)))
+
 (defn sha256 [^bytes bytes]
   (format "%064x" (BigInteger. 1 (.digest (MessageDigest/getInstance "SHA-256") bytes))))
 
 (defn- canonical [x]
   (cond
-    (map? x) (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
+    (map? x) (into (sorted-map-by #(compare (edn-str %1) (edn-str %2)))
                   (map (fn [[k v]] [k (canonical v)])) x)
-    (set? x) (vec (sort-by pr-str (map canonical x)))
+    (set? x) (into (sorted-set-by #(compare (edn-str %1) (edn-str %2))) (map canonical) x)
     (sequential? x) (mapv canonical x)
     (or (nil? x) (string? x) (number? x) (boolean? x) (keyword? x) (symbol? x)) x
     :else (str "<" (.getName (class x)) ">")))
 
 (defn config-hash [config]
-  (sha256 (.getBytes (pr-str (canonical config)) "UTF-8")))
+  (sha256 (.getBytes (edn-str (canonical config)) "UTF-8")))
 
 (defn kaocha-version []
   (with-open [r (io/reader (io/resource "META-INF/maven/lambdaisland/kaocha/pom.properties"))]
@@ -73,7 +79,7 @@
         state {:run-id id :started started :nano (System/nanoTime)
                :tmp tmp :path path :committed? (atom false)
                :config-hash (::config-hash config) :git-sha (git-sha)}]
-    (spit tmp (pr-str (select-keys (assoc state :status :running) [:run-id :started :status])))
+    (spit tmp (edn-str (select-keys (assoc state :status :running) [:run-id :started :status])))
     state))
 
 (defn- totals [r]
@@ -86,12 +92,12 @@
         m (:kaocha.testable/meta t)]
     {:ns (or (some-> id namespace) (some-> (:kaocha.ns/name t) str))
      :var (when (and id (namespace id)) (name id))
-     :message (:message e)
-     :expected (binding [*print-length* nil *print-level* nil] (pr-str (:expected e)))
-     :actual (binding [*print-length* nil *print-level* nil]
-               (pr-str (if (instance? Throwable (:actual e))
-                         (Throwable->map (:actual e)) (:actual e))))
-     :file (or (:file e) (:file m)) :line (or (:line e) (:line m))}))
+     :message (some-> (:message e) str)
+     :expected (edn-str (:expected e))
+     :actual (edn-str (if (instance? Throwable (:actual e))
+                       (Throwable->map (:actual e)) (:actual e)))
+     :file (some-> (or (:file e) (:file m) (:kaocha.testable/load-error-file t)) str)
+     :line (or (:line e) (:line m) (:kaocha.testable/load-error-line t))}))
 
 (defn- test-outcome [t]
   (let [{:keys [fail error pending tests]} (totals t)]
@@ -106,7 +112,7 @@
         receipt (cond-> {:run-id run-id :started started :finished (str (Instant/now))
                          :wall-ms (/ (- (System/nanoTime) nano) 1e6)
                          :totals (totals r)
-                         :failures (mapv failure (filter #(contains? #{:fail :error} (:type %))
+                         :failures (mapv failure (filter hierarchy/fail-type?
                                                         (mapcat :kaocha.testable/events nodes)))
                          :config-hash config-hash :jvm-pid (.pid (ProcessHandle/current))
                          :kaocha-version (kaocha-version) :plugin-version plugin-version}
@@ -115,7 +121,7 @@
                   (assoc :affected (:kaocha.plugin.affected/selection r))
                   (::include-tests? r)
                   (assoc :tests (mapv test-outcome (filter #(= :kaocha.type/var (:kaocha.testable/type %)) nodes))))]
-    (Files/write (.toPath tmp) (.getBytes (str (pr-str receipt) "\n") "UTF-8") (make-array OpenOption 0))
+    (Files/write (.toPath tmp) (.getBytes (str (edn-str receipt) "\n") "UTF-8") (make-array OpenOption 0))
     (Files/move (.toPath tmp) (.toPath path) (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE]))
     (reset! committed? true)
     (-> r (assoc ::path (str path))
