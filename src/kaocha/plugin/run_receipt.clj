@@ -17,7 +17,7 @@
 
 (defn- edn-str [x]
   (binding [*print-length* nil *print-level* nil *print-readably* true
-            *print-dup* false *print-meta* false]
+            *print-dup* false *print-meta* false *print-namespace-maps* false]
     (pr-str x)))
 
 (defn sha256 [^bytes bytes]

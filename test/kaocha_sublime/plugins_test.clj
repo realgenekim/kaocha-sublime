@@ -17,3 +17,7 @@
 (deftest hash-preserves-edn-collection-types
   (is (not= (receipt/config-hash {:x #{1 2}})
             (receipt/config-hash {:x [1 2]}))))
+
+(deftest config-hash-ignores-namespace-print-sugar
+  (is (= (binding [*print-namespace-maps* true] (receipt/config-hash {:app/a 1 :app/b 2}))
+         (binding [*print-namespace-maps* false] (receipt/config-hash {:app/a 1 :app/b 2})))))

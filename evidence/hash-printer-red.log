@@ -1,0 +1,20 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+
+Testing kaocha-sublime.plugins-test
+
+FAIL in (config-hash-ignores-namespace-print-sugar) (plugins_test.clj:22)
+expected: (= (binding [*print-namespace-maps* true] (receipt/config-hash #:app{:a 1, :b 2})) (binding [*print-namespace-maps* false] (receipt/config-hash #:app{:a 1, :b 2})))
+  actual: (not (= "185d2c9152ffc9fb3e6a91bf8897498f82ec4141885c7c394ccbb9bad394d5c7" "af932002229bb2ea3e731fe016d440063494ff83c34b39fed91b54d579fdc361"))
+
+Testing kaocha-sublime.receipt-test
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+
+Testing kaocha-sublime.affected-test
+
+Ran 13 tests containing 44 assertions.
+1 failures, 0 errors.
