@@ -1,0 +1,7 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+Execution error (FileNotFoundException) at kaocha-sublime.plugins-test/eval142$loading (plugins_test.clj:1).
+Could not locate kaocha/plugin/run_receipt__init.class, kaocha/plugin/run_receipt.clj or kaocha/plugin/run_receipt.cljc on classpath. Please check that namespaces with dashes use underscores in the Clojure file name.
+
+Full report at:
+/var/tmp/forge/clojure-72965705348281049.edn
