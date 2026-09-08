@@ -29,4 +29,52 @@
    :misreadings ["Any requested namespace suffices." "Unknown closure means covered."]
    :boundaries ["Empty request" "Missing selection metadata" "Outside closure"]
    :tests [:closure-subset-state-space]
-   :rationale "A green selected run is meaningful only for its declared closure."}]}
+   :rationale "A green selected run is meaningful only for its declared closure."}
+  {:id :AGENT-CANDIDATE-006 :status :active
+   :ears "While a runner session is known, when a save is marked, the token shall bind its content manifest and required scope."
+   :misreadings ["Timestamp equality proves byte identity." "LATEST green can answer any newer mark."]
+   :boundaries ["Fast run before mark" "Same-mtime overwrite" "Deletion" "Identical candidate coalescing"]
+   :tests [:mark-binds-content]
+   :rationale "Agent grammar v1 build, 2026-09-08."}
+  {:id :AGENT-ACCEPT-007 :status :active
+   :ears "When following a token, status shall exit zero only for an exact candidate with complete required coverage and a passing result."
+   :misreadings ["A focused pass covers the full suite." "A follow-up replaces its primary."]
+   :boundaries ["Superseded" "Uncovered" "Unknown image" "Timeout"]
+   :tests [:follow-acceptance-state-space]
+   :rationale "Agent grammar v1 build, 2026-09-08."}
+  {:id :AGENT-DEATH-008 :status :active
+   :ears "While an exact candidate is active, when its PID/start identity is dead, status shall report killed."
+   :misreadings ["PID existence is enough." "SIGKILL can yield DONE."]
+   :boundaries ["PID reuse" "Reaped active record" "Old LATEST"]
+   :tests [:dead-candidate-never-done]
+   :rationale "Agent grammar v1 build, 2026-09-08."}
+  {:id :AGENT-ENCODER-009 :status :active
+   :ears "When projecting caller evidence, the encoder shall emit bounded ASCII JSON records without executing arbitrary printers or lazy values."
+   :misreadings ["Print the whole value then truncate." "Escaped newline can delimit another record."]
+   :boundaries ["Infinite lazy seq" "Throwing printer" "Unicode and ANSI" "Field and run byte caps"]
+   :tests [:bounded-untrusted-values]
+   :rationale "Agent grammar v1 build, 2026-09-08."}
+  {:id :AGENT-PUBLISH-010 :status :active
+   :ears "When an agent run completes, DONE shall be emitted only after receipt and LATEST publication."
+   :misreadings ["Summary means committed." "Captured stdout supplies protocol records."]
+   :boundaries ["Load error" "Publication failure" "Probe and gate"]
+   :tests [:agent-publication-order]
+   :rationale "Agent grammar v1 build, 2026-09-08."}
+  {:id :AGENT-HEAP-011 :status :active
+   :ears "Before agent test loading, when explicit heap cap evidence is missing or exceeds policy, the runner shall refuse with heap-cap."
+   :misreadings ["Runtime.maxMemory being finite proves explicit cap." "A launcher claim overrides effective heap."]
+   :boundaries ["Missing Xmx" "Oversized effective cap" "512m admission"]
+   :tests [:heap-admission-state-space]
+   :rationale "Agent grammar v1 build, 2026-09-08."}
+  {:id :AGENT-IMAGE-012 :status :active
+   :ears "When a run claims exact identity, its candidate shall be bound to an unchanged observed generation across loading and execution."
+   :misreadings ["Pre/post disk equality catches transient saves." "Warm Vars always equal disk."]
+   :boundaries ["Reload failure" "Config change" "Transient edit" "Unattested probe"]
+   :tests [:observed-generation-invalidates-identity]
+   :rationale "Agent grammar v1 build, 2026-09-08."}
+  {:id :AGENT-BUDGET-013 :status :active
+   :ears "When failures exceed inline budgets, DONE shall report exact shown and omitted event counts."
+   :misreadings ["Twenty events always fit 16 KiB." "Omitted failures can disappear from counts."]
+   :boundaries ["25 failures" "Large fields" "Oversize identity"]
+   :tests [:failure-budget-accounting]
+   :rationale "Agent grammar v1 build, 2026-09-08."}]}
