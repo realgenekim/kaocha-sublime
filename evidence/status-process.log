@@ -1,0 +1,4 @@
+PASS SIGKILL exact JVM pid 3013038 : one tmp, zero edn
+PASS concurrent isolated JVMs, shared receipt directory: distinct ids, totals, separate complete markers
+PASS first lazy plugin load inside warm repl/run, then second run: distinct returned paths
+PASS fixed-id collision: one winner, one refusal, completed receipt retained

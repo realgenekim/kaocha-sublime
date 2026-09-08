@@ -1,0 +1,6 @@
+PASS leaf 4 tests, 3 assertions AFFECTED 1/2
+PASS source 4 tests, 3 assertions AFFECTED 1/2
+PASS deps 5 tests, 4 assertions AFFECTED FULL:
+PASS unknown 5 tests, 4 assertions AFFECTED FULL:
+PASS tracker 5 tests, 4 assertions AFFECTED FULL:
+PASS clean 5 tests, 4 assertions AFFECTED FULL:
