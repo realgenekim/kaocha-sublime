@@ -1,0 +1,32 @@
+;; Append-only: retire or supersede IDs; never delete or repurpose them.
+{:intents
+ [{:id :STATUS-POINTER-001 :status :active
+   :ears "When a run completes, LATEST shall atomically identify its complete receipt."
+   :misreadings ["Pick the newest EDN file by mtime." "A tmp file is a verdict."]
+   :boundaries ["Old installations without LATEST" "Publication interrupted between renames"]
+   :tests [:latest-points-to-completed-receipt :pointer-is-the-only-verdict-entrance]
+   :rationale "Gene, 2026-09-08: noisy watch output confused agents about verdicts."}
+  {:id :STATUS-IDENTITY-002 :status :active
+   :ears "When status is asked about a save, it shall refuse receipts started before that save."
+   :misreadings ["Compare the finish time." "An automatic follow-up replaces the save's run."]
+   :boundaries ["Edit during a run" "File mtime and explicit instant" "Unchanged automatic follow-up"]
+   :tests [:save-identity-state-space :automatic-followup-keeps-save-identity]
+   :rationale "Gene asked to disambiguate MY run, including focused-green follow-ups."}
+  {:id :STATUS-TRIGGER-003 :status :active
+   :ears "When the watcher schedules a rerun, its receipt shall preserve the watcher's changed-file trigger."
+   :misreadings ["The content snapshot is the watcher event list." "Every empty change set is automatic."]
+   :boundaries ["Initial run" "Enter" "Batched events" "Automatic full rerun"]
+   :tests [:watcher-events-and-automatic-rescan]
+   :rationale "Watch identity needs upstream provenance, not guessed causes."}
+  {:id :STATUS-CRASH-004 :status :active
+   :ears "When an incomplete run is reaped, status shall refuse an older completed verdict."
+   :misreadings ["Delete tmp and display yesterday's green." "Kill a pid based only on its number."]
+   :boundaries ["SIGKILL" "Live process" "PID reuse" "Next successful run"]
+   :tests [:reaped-run-never-resurrects-old-green]
+   :rationale "A killed watcher must never look like a passing run."}
+  {:id :STATUS-CLOSURE-005 :status :active
+   :ears "When namespaces are requested, status shall report whether every requested namespace is in the recorded closure."
+   :misreadings ["Any requested namespace suffices." "Unknown closure means covered."]
+   :boundaries ["Empty request" "Missing selection metadata" "Outside closure"]
+   :tests [:closure-subset-state-space]
+   :rationale "A green selected run is meaningful only for its declared closure."}]}

@@ -5,7 +5,8 @@
             [clojure.string :as str]
             [kaocha.api :as api] [kaocha.config :as config]
             [kaocha.repl :as repl] [kaocha.result :as result]
-            [kaocha.plugin.run-receipt])
+            [kaocha.plugin.run-receipt :as receipt]
+            [kaocha.watch :as watch])
   (:import (java.nio.file Files)))
 
 (defn temp-dir [] (str (Files/createTempDirectory "kaocha-sublime-" (make-array java.nio.file.attribute.FileAttribute 0))))
@@ -20,6 +21,44 @@
      :kaocha/reporter ['kaocha.report/documentation]
      :kaocha/color? false :kaocha.plugin.run-receipt/dir dir
      :kaocha.plugin.run-receipt/include-tests? true}))
+
+;; INTENT-TEST: STATUS-POINTER-001
+(deftest latest-points-to-completed-receipt
+  (let [dir (temp-dir)]
+    (with-out-str
+      (binding [clojure.test/*test-out* *out* clojure.test/*report-counters* nil]
+        (doseq [_ (range 2)]
+          (let [r (api/run (fixture-config dir))
+                path (:kaocha.plugin.run-receipt/path r)
+                receipt (edn/read-string (slurp path))
+                latest (io/file dir "LATEST")]
+            (is (.exists latest))
+            (when (.exists latest)
+              (is (= {:path path :run-id (:run-id receipt) :finished (:finished receipt)}
+                     (edn/read-string (slurp latest)))))
+            (is (= [] (get-in receipt [:trigger :files])))
+            (is (string? (get-in receipt [:trigger :at])))
+            (is (false? (:auto-followup? receipt)))))))))
+
+;; INTENT-TEST: STATUS-TRIGGER-003
+(deftest watcher-events-and-automatic-rescan
+  ;; Install through the ordinary plugin configuration entrance.
+  (receipt/run-receipt-config-hook {})
+  (let [dir (temp-dir) a (io/file dir "a.clj") b (io/file dir "b.clj")
+        q (watch/make-queue)]
+    (spit a "(ns a)") (spit b "(ns b)")
+    (watch/qput q a) (watch/qput q b)
+    (let [[tracker _] (watch/wait-and-rescan! q {} [(io/file dir)] [])]
+      (is (= [(str a) (str b)] (get-in tracker [:kaocha.plugin.run-receipt/trigger :files])))
+      (is (false? (:kaocha.plugin.run-receipt/auto-followup? tracker)))
+      (is (string? (get-in tracker [:kaocha.plugin.run-receipt/trigger :at])))
+      (let [auto (watch/drain-and-rescan! q tracker [(io/file dir)])]
+        (is (true? (:kaocha.plugin.run-receipt/auto-followup? auto)))
+        (is (= [] (get-in auto [:kaocha.plugin.run-receipt/trigger :files]))))
+      (watch/qput q :enter)
+      (let [[manual _] (watch/wait-and-rescan! q tracker [(io/file dir)] [])]
+        (is (false? (:kaocha.plugin.run-receipt/auto-followup? manual)))
+        (is (= [] (get-in manual [:kaocha.plugin.run-receipt/trigger :files])))))))
 
 (deftest complete-receipt-matches-reporter-and-capture
   (let [dir (temp-dir) r (atom nil)
