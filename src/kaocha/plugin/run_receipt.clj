@@ -268,11 +268,11 @@
             state (assoc state :candidate (candidate/candidate-id state))
             state (agent/new-stream! state)]
         (reset! pending state)
+        (when *run-state* (reset! *run-state* state))
         (reset! (:attestation state) {:exact? (image/admission-identity state)})
         (candidate/publish-session! dir session)
         (Files/deleteIfExists (.toPath (io/file dir "REFUSED")))
         (reset! image/active state)
-        (when *run-state* (reset! *run-state* state))
         (spit tmp (edn-str (active-record state)))
         (agent/start! state)
         (doseq [owner dead]

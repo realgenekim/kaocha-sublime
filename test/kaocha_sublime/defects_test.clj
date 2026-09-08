@@ -212,6 +212,17 @@
       (is (= 0 (:exit good)))
       (is (= "pass" (get-in (last (records (:events good))) [1 :outcome]))))))
 
+;; INTENT-TEST: AGENT-LEASE-014
+(deftest probe-retains-stream-address-if-session-publication-fails
+  (let [cfg (skip-fixture (temp-dir))
+        r (with-redefs [candidate/publish-session! (fn [& _] (throw (ex-info "session failed" {})))]
+            (probe-run '[declared-gate-test] cfg))]
+    (is (= 2 (:exit r)))
+    (is (string? (:events r)))
+    (when (:events r)
+      (is (= ["STATUS"] (mapv first (records (:events r))))))
+    (is (not (.isLocked image/run-lock)))))
+
 ;; INTENT-TEST: AGENT-ARITHMETIC-018
 (deftest inconsistent-arithmetic-cannot-be-published
   (let [dir (temp-dir) cfg (skip-fixture dir) original @#'receipt/totals
