@@ -11,7 +11,7 @@
            (java.time Instant)))
 
 (defn status [dir & args]
-  (let [r (apply shell/sh "bin/kaocha-status" "--dir" dir args)]
+  (let [r (apply shell/sh "bin/kaocha-status" "--legacy" "--dir" dir args)]
     (is (= 0 (:exit r)) (:err r))
     (is (= "" (:err r)))
     (is (= 1 (count (str/split-lines (:out r)))))

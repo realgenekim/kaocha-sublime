@@ -7,9 +7,16 @@
             [kaocha.plugin :refer [defplugin]]
             [kaocha.result :as result]
             [kaocha.testable :as testable]
-            [kaocha.watch :as watch])
+            [kaocha.watch :as watch]
+            [kaocha-sublime.agent :as agent]
+            [kaocha-sublime.candidate :as candidate]
+            [kaocha-sublime.heap :as heap]
+            [kaocha-sublime.image :as image]
+            [kaocha-sublime.protocol :as protocol]
+            [slingshot.slingshot :refer [throw+]])
   (:import (java.lang ProcessHandle)
-           (java.nio.file Files StandardCopyOption OpenOption)
+           (java.nio.file Files StandardCopyOption OpenOption StandardOpenOption)
+           (java.nio.channels FileChannel)
            (java.security MessageDigest)
            (java.time Instant)
            (java.util UUID Properties)))
@@ -55,6 +62,11 @@
 
 ;; INTENT: STATUS-TRIGGER-003
 (defn- install-watch-adapter! []
+  (adapt! #'watch/qput
+          (fn [f] (fn [q event]
+                    (when-not (keyword? event) (swap! image/observed inc))
+                    (f q event))))
+  (adapt! #'watch/track-reload! (fn [f] (fn [tracker] (image/reload! f tracker))))
   ;; Kaocha 1.91.1392 discards both the drained events and the run-loop branch.
   ;; These wrappers observe its real queue; they neither manufacture events nor
   ;; change reload/selection. Only run-loop's automatic branch rescans outside wait.
@@ -108,6 +120,44 @@
          (when (zero? exit) (str/trim out)))
        (catch Exception _ nil)))
 
+(defn- agent-config [config]
+  (let [reporters (:kaocha/reporter config)
+        enabled? (or (::agent? config) (= "1" (System/getenv "KAOCHA_AGENT"))
+                     (some #{'kaocha.report/agent} (if (vector? reporters) reporters [reporters])))]
+    (if-not enabled? config
+      (let [dir (candidate/canonical (::dir config "target/kaocha-runs/"))
+            caps (heap/current (::heap-ceiling-bytes config 536870912))
+            session (image/session config (::config-hash config))]
+        (when-not (:admitted? caps)
+          (let [state (agent/new-stream! {:dir dir :run-id (str "refused-" (UUID/randomUUID))
+                                           :mode (image/mode config) :session (:session session)})]
+            (agent/refuse! state :heap-cap)
+            (candidate/atomic-edn! (io/file dir "HEAP-REFUSAL") caps)
+            (throw+ {:kaocha/early-exit 2 :reason :heap-cap})))
+        (assoc config ::agent? true ::agent-session session ::heap caps
+                      ;; Agent selection is a complete view. Human reporters remain
+                      ;; available in ordinary mode, including the old marker.
+                      :kaocha/reporter ['kaocha.report/agent])))))
+
+(defn- active-record [state]
+  (merge (select-keys state [:run-id :started :trigger :auto-followup? :followup-of
+                             :workspace :session :generation :candidate :mode :events :heap])
+         {:status :running :phase :load :identity :unknown
+          :jvm-pid (.pid (ProcessHandle/current))
+          :process-start (str (.get (.startInstant (.info (ProcessHandle/current)))))}))
+
+(defn- reserve-lock! [dir]
+  (let [channel (FileChannel/open (.toPath (io/file dir "LOCK"))
+                                  (into-array StandardOpenOption [StandardOpenOption/CREATE StandardOpenOption/WRITE]))]
+    (try
+      (if-let [lock (.tryLock channel)]
+        (if (and (zero? (.getHoldCount image/run-lock)) (.tryLock image/run-lock))
+          {:channel channel :lock lock}
+          (do (.release lock) (.close channel)
+              (throw (ex-info "Another invocation owns this JVM" {:reason :protocol-error}))))
+        (do (.close channel) (throw (ex-info "Another run owns this image" {:reason :protocol-error}))))
+      (catch Exception e (.close channel) (throw e)))))
+
 (defn- begin! [config]
   (let [started (str (Instant/now))
         id (or (System/getenv "KAOCHA_RUN_ID")
@@ -119,6 +169,7 @@
         path (io/file dir (str id ".edn"))
         tmp (io/file dir (str id ".edn.tmp"))
         _ (when (.exists path) (throw (ex-info "Receipt id already completed" {:path (str path)})))
+        lease (when (::agent? config) (reserve-lock! dir))
         _ (Files/createFile (.toPath tmp) (make-array java.nio.file.attribute.FileAttribute 0))
         _ (when (.exists path)
             (Files/delete (.toPath tmp))
@@ -130,49 +181,84 @@
                :auto-followup? (true? (get-in config [:kaocha.watch/tracker ::auto-followup?]))
                :followup-of (get-in config [:kaocha.watch/tracker ::last-path])
                :config-hash (::config-hash config) :git-sha (git-sha)}]
-    (spit tmp (edn-str (assoc (select-keys state [:run-id :started :trigger :auto-followup? :followup-of])
-                             :status :running :jvm-pid (.pid (ProcessHandle/current))
-                             :process-start (str (.get (.startInstant (.info (ProcessHandle/current))))))))
-    state))
+    (if (::agent? config)
+      (let [session (::agent-session config)
+            snapshot (image/capture session)
+            state (merge state session snapshot
+                         {:dir (str dir) :mode (image/mode config) :heap (::heap config)
+                          :lease lease :attestation (atom {}) :configuration-valid? (atom true)})
+            state (assoc state :candidate (candidate/candidate-id state))
+            state (agent/new-stream! state)]
+        (reset! (:attestation state) {:exact? (image/admission-identity state)})
+        (candidate/publish-session! dir session)
+        (reset! image/active state)
+        (spit tmp (edn-str (active-record state)))
+        (agent/start! state)
+        state)
+      (do (spit tmp (edn-str (active-record state))) state))))
 
 (defn- totals [r]
   (let [{:kaocha.result/keys [count pass fail error pending]} (result/testable-totals r)]
     {:tests count :assertions (+ pass fail error) :pass pass :fail fail :error error :pending pending}))
 
 (defn- failure [e]
-  (let [t (:kaocha/testable e)
-        id (:kaocha.testable/id t)
-        m (:kaocha.testable/meta t)]
+  (let [t (:kaocha/testable e) id (:kaocha.testable/id t)
+        r (agent/failure-record {} e 1)]
     {:ns (or (some-> id namespace) (some-> (:kaocha.ns/name t) str))
      :var (when (and id (namespace id)) (name id))
-     :message (some-> (:message e) str)
-     :expected (edn-str (:expected e))
-     :actual (edn-str (if (instance? Throwable (:actual e))
-                       (Throwable->map (:actual e)) (:actual e)))
-     :file (some-> (or (:file e) (:file m) (:kaocha.testable/load-error-file t)) str)
-     :line (or (:line e) (:line m) (:kaocha.testable/load-error-line t))}))
+     :message (:context r) :expected (:expected r) :actual (:actual r)
+     :file (:file r) :line (:line r) :truncated (:truncated r) :unavailable (:unavailable r)}))
 
 (defn- test-outcome [t]
   (let [{:keys [fail error pending tests]} (totals t)]
     {:id (:kaocha.testable/id t)
      :outcome (cond (pos? error) :error (pos? fail) :fail (pos? pending) :pending
                     (zero? tests) :skipped :else :pass)
-     :stdout (get t :kaocha.plugin.capture-output/output "")}))
+     :stdout (:text (protocol/text-preview (get t :kaocha.plugin.capture-output/output "") 16384))}))
 
 ;; INTENT: STATUS-POINTER-001
 (defn- publish-latest! [path receipt]
   (let [dir (.getParentFile ^java.io.File path)
         tmp (io/file dir (str "LATEST." (:run-id receipt) ".tmp"))]
-    (spit tmp (str (edn-str {:path (str path) :run-id (:run-id receipt)
-                           :finished (:finished receipt)}) "\n"))
+    (spit tmp (str (edn-str (cond-> {:path (str path) :run-id (:run-id receipt)
+                                    :finished (:finished receipt)}
+                             (:schema receipt) (assoc :sha256 (candidate/file-hash path)))) "\n"))
     (Files/move (.toPath tmp) (.toPath (io/file dir "LATEST"))
                 (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE
                                                 StandardCopyOption/REPLACE_EXISTING]))))
 
+(defn- namespace-results [r]
+  (filter #(= :kaocha.type/ns (:kaocha.testable/type %)) (testable/test-seq-with-skipped r)))
+
+(defn- coverage-data [r]
+  (let [namespaces (namespace-results r)
+        selected (filter #(and (= :kaocha.type/ns (:kaocha.testable/type %))
+                                (or (contains? % :kaocha.result/tests)
+                                    (empty? (:kaocha.test-plan/tests %)))) (testable/test-seq r))
+        complete? (fn [n]
+                    (let [leaves (filter hierarchy/leaf? (testable/test-seq-with-skipped n))]
+                      (and (not (:kaocha.testable/load-error n))
+                           (every? #(and (not (:kaocha.testable/skip %))
+                                         (pos? (:kaocha.result/count % 0))
+                                         (zero? (:kaocha.result/pending % 0))) leaves))))
+        full (filter complete? selected)
+        leaves (filter hierarchy/leaf? (testable/test-seq-with-skipped r))
+        executed (filter #(and (pos? (:kaocha.result/count % 0))
+                               (zero? (:kaocha.result/pending % 0))) leaves)
+        pending (filter #(pos? (:kaocha.result/pending % 0)) leaves)]
+    {:closure (when (seq namespaces) {:selected (count selected) :total (count namespaces)})
+     :executed-namespaces (mapv (comp str :kaocha.ns/name) selected)
+     :partial-namespaces (mapv (comp str :kaocha.ns/name) (remove #(contains? (set (map :kaocha.testable/id full)) (:kaocha.testable/id %)) selected))
+     :coverage (cond (empty? selected) :unknown (= (count full) (count selected)) :complete :else :partial)
+     :executed-tests (count executed)
+     :skipped-tests (- (count leaves) (count executed) (count pending))}))
+
 (defn- finish! [r]
   (let [{:keys [run-id started nano tmp path committed? config-hash git-sha
-                trigger auto-followup? followup-of]} (::state r)
+                trigger auto-followup? followup-of] :as state} (::state r)
         nodes (testable/test-seq-with-skipped r)
+        coverage (when (:events state) (coverage-data r))
+        identity (when (:events state) (image/finish-identity! state))
         receipt (cond-> {:run-id run-id :started started :finished (str (Instant/now))
                          :wall-ms (/ (- (System/nanoTime) nano) 1e6)
                          :trigger trigger :auto-followup? auto-followup?
@@ -181,6 +267,19 @@
                                                         (mapcat :kaocha.testable/events nodes)))
                          :config-hash config-hash :jvm-pid (.pid (ProcessHandle/current))
                          :kaocha-version (kaocha-version) :plugin-version plugin-version}
+                  (:events state)
+                  (merge (select-keys state [:workspace :session :generation :candidate :manifest
+                                              :observed :mode :events :heap :classpath-generation])
+                         (dissoc coverage :executed-tests :skipped-tests)
+                         {:schema 1 :identity identity
+                          :identity-proof (select-keys @(:attestation state)
+                                                       [:base-valid? :changed-covered? :reload-stable? :reload-observed
+                                                        :scheduled :changed :finish-observed :disk-stable? :configuration-valid?])
+                          :process-start (:process-start (active-record state))
+                          :failure-budget @(:budget state) :failures @(:failures state)
+                          :totals (assoc (totals r) :tests (:executed-tests coverage) :skipped (:skipped-tests coverage))
+                          :parent (when (and auto-followup? followup-of) (:run-id (candidate/read-edn followup-of)))
+                          :parent-sha256 (when (and auto-followup? followup-of) (candidate/file-hash followup-of))})
                   git-sha (assoc :git-sha git-sha)
                   (and auto-followup? followup-of) (assoc :followup-of followup-of)
                   (:kaocha.plugin.affected/selection r)
@@ -195,11 +294,16 @@
     (publish-latest! path receipt)
     (Files/delete (.toPath tmp))
     (reset! committed? true)
+    (when (:events state)
+      (agent/done! state receipt)
+      (.release ^java.nio.channels.FileLock (get-in state [:lease :lock]))
+      (.close ^FileChannel (get-in state [:lease :channel]))
+      (.unlock image/run-lock))
     (-> (cond-> r (:kaocha.watch/tracker r)
           (update :kaocha.watch/tracker
                   #(-> % (dissoc ::pending-state)
                        (assoc ::last-path (str path)
-                              ::settings (select-keys r [::dir ::config-hash])))))
+                              ::settings (select-keys r [::dir ::config-hash ::agent? ::agent-session ::heap :kaocha/tests])))))
         (assoc ::path (str path))
         (update :kaocha.result/tests #(mapv (fn [t] (assoc t ::path (str path))) %)))))
 
@@ -209,15 +313,22 @@
     (install-watch-adapter!)
     (let [config (assoc config ::config-hash
                         (config-hash (dissoc config ::config-hash ::state :kaocha.watch/tracker
-                                             :kaocha.plugin.affected/decision :kaocha.plugin.affected/snapshot)))]
+                                             :kaocha.plugin.affected/decision :kaocha.plugin.affected/snapshot
+                                             ::agent-session ::heap ::agent? :kaocha.plugin.randomize/seed
+                                             :kaocha.watch/focus :kaocha.filter/focus)))
+          config (agent-config config)]
       ;; Reuse the reservation made when watch accepted the event, before rescan.
       ;; Initial watch runs reserve here, before reload. CLI config has no tracker.
       (if-let [tracker (:kaocha.watch/tracker config)]
         (assoc config ::state
                (if-let [pending (::pending-state tracker)]
-                 (assoc pending :trigger (::trigger tracker)
-                                :auto-followup? (true? (::auto-followup? tracker))
-                                :config-hash (::config-hash config))
+                 (do
+                   (when (:events pending)
+                     (reset! (:configuration-valid? pending)
+                             (= (:generation pending) (get-in config [::agent-session :generation]))))
+                   (assoc pending :trigger (::trigger tracker)
+                                  :auto-followup? (true? (::auto-followup? tracker))
+                                  :config-hash (::config-hash config)))
                  (begin! config)))
         config)))
   (pre-load [config]
@@ -226,8 +337,14 @@
       (assoc config ::state state
              :kaocha/reporter
              (fn [event]
-               (reporter event)
-               (when (and (= :summary (:type event)) @(:committed? state))
+               (binding [agent/*stream* (when (:events state) state)] (reporter event))
+               (when (and (not (:events state)) (= :summary (:type event)) @(:committed? state))
                  (println)
                  (println "RUN-RECEIPT" (str (:path state))) (flush))))))
+  (pre-run [plan]
+    (when-let [state (when (:events (::state plan)) (::state plan))]
+      (candidate/atomic-edn! (:tmp state)
+                            (assoc (active-record state) :phase :run
+                                   :identity (if (:exact? @(:attestation state)) :exact :unknown))))
+    plan)
   (post-run [r] (finish! r)))

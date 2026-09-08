@@ -1,5 +1,7 @@
 {:paths ["src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         lambdaisland/kaocha {:mvn/version "1.91.1392"}}
- :aliases {:test {:extra-paths ["test" "fixtures/tiny/src"]
+ :aliases {:test {:jvm-opts ["-Xms64m" "-Xmx512m"]
+                  :extra-deps {org.clojure/data.json {:mvn/version "2.5.1"}}
+                  :extra-paths ["test" "fixtures/tiny/src"]
                   :main-opts ["-m" "kaocha-sublime.test-runner"]}}}

@@ -4,15 +4,14 @@
             [clojure.java.shell :as shell]
             [clojure.set :as set]
             [clojure.string :as str]
+            [kaocha-sublime.candidate :as candidate]
             [kaocha.plugin :refer [defplugin]]
             [kaocha.result :as result]
             [kaocha.testable :as testable]
-            [kaocha.plugin.run-receipt :as receipt]
             [lambdaisland.tools.namespace.dependency :as dep]
             [lambdaisland.tools.namespace.dir :as dir]
             [lambdaisland.tools.namespace.file :as file]
-            [lambdaisland.tools.namespace.track :as track])
-  (:import (java.nio.file Files)))
+            [lambdaisland.tools.namespace.track :as track]))
 
 (defn closure [graph known changed]
   (when (or (nil? graph) (not (set/subset? changed known)))
@@ -28,11 +27,7 @@
        (map io/file) (filter #(.exists %)) distinct))
 
 (defn- snapshot [config]
-  (into {}
-        (for [f (distinct (concat (mapcat file-seq (roots config))
-                                  (map io/file ["deps.edn" "tests.edn"])))
-              :when (.isFile ^java.io.File f)]
-          [(canonical-path f) (receipt/sha256 (Files/readAllBytes (.toPath ^java.io.File f)))])))
+  (candidate/snapshot {:roots (roots config) :config-files ["deps.edn" "tests.edn"]}))
 
 (defn- git-files [since]
   (let [sha (shell/sh "git" "rev-parse" "--verify" (str since "^{commit}"))]

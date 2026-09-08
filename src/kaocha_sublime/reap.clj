@@ -27,7 +27,7 @@
             ;; leave both, but cannot expose an older green as the current run.
             (when (or (nil? previous) (status/newer? (:started r) (:started previous)))
               (let [tmp (io/file dir (str "INTERRUPTED." (UUID/randomUUID) ".tmp"))]
-                (spit tmp (pr-str (select-keys r [:run-id :started :jvm-pid :process-start])))
+                (spit tmp (pr-str (select-keys r [:run-id :started :jvm-pid :process-start :candidate :workspace :session :generation])))
                 (Files/move (.toPath tmp) (.toPath marker)
                             (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE
                                                             StandardCopyOption/REPLACE_EXISTING]))))
