@@ -248,3 +248,31 @@
     (is (thrown? clojure.lang.ExceptionInfo (protocol/record-line :done done)))
     (is (= 2 (:exit response)))
     (is (= :protocol-error (get-in response [:record :reason])))))
+
+;; INTENT-TEST: AGENT-PARENT-OUTCOME-019
+(deftest followup-done-carries-parent-outcome
+  (doseq [[focus missing? expected]
+          [[[:sample.core-test/failing] false {:outcome "fail" :fail 1 :error 0}]
+           [[:sample.core-test/failing :sample.core-test/erroring] false {:outcome "error" :fail 1 :error 1}]
+           [[:sample.other-test] false {:outcome "pass" :fail 0 :error 0}]
+           [[:sample.other-test] true {:outcome "unknown" :fail nil :error nil}]]]
+    (let [dir (temp-dir) cfg (config dir)
+          primary (run! (assoc cfg :kaocha.filter/focus focus))
+          parent-path (:kaocha.plugin.run-receipt/path primary)
+          parent (candidate/read-edn parent-path)
+          _ (when missing? (io/delete-file parent-path))
+          child (run! (assoc cfg :kaocha.filter/focus [:sample.other-test]
+                             :kaocha.watch/tracker {:kaocha.plugin.run-receipt/auto-followup? true
+                                                    :kaocha.plugin.run-receipt/last-path parent-path}))
+          path (:kaocha.plugin.run-receipt/path child)
+          receipt (candidate/read-edn path)
+          done (second (last (records (:events receipt))))]
+      (is (= "pass" (:outcome done)))
+      (is (true? (:auto_followup done)))
+      (is (= (when-not missing? (:run-id parent)) (:parent done)))
+      (is (= expected (:parent_outcome done)))
+      ;; Completion is immutable: replay must not re-read a now-missing parent.
+      (when-not missing? (io/delete-file parent-path))
+      (is (= done (-> (protocol/done-record receipt path (candidate/file-hash path))
+                      protocol/json
+                      (clojure.data.json/read-str :key-fn keyword)))))))

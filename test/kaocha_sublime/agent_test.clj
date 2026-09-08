@@ -218,6 +218,38 @@
                            (assoc-in [:totals :assertions] 2)))
     (is (= 1 (:exit (status/observe opts))))))
 
+;; INTENT-TEST: AGENT-PARENT-OUTCOME-019
+(deftest parent-summary-never-replaces-primary-token-selection
+  (doseq [fail [0 1]]
+    (let [{:keys [dir record] :as opts} (token-fixture)
+          primary (-> record (assoc-in [:totals :fail] fail)
+                      (assoc-in [:totals :assertions] (+ 1 fail)))
+          path (publish-token! dir primary)
+          child (assoc record :run-id "automatic" :auto-followup? true :followup-of path
+                       :parent "primary" :parent-sha256 (candidate/file-hash path)
+                       :parent-outcome {:outcome (if (zero? fail) :pass :fail) :fail fail :error 0}
+                       :trigger {:files []})]
+      (publish-token! dir child)
+      (doseq [answer [(status/observe opts)
+                      (status/follow-result (assoc opts :follow true :timeout 0.0))]]
+        (is (= "primary" (get-in answer [:record :id])))
+        (is (= fail (:exit answer)))))))
+
+;; INTENT-TEST: AGENT-PARENT-OUTCOME-019
+(deftest followup-parent-summary-grammar
+  (let [{:keys [record]} (token-fixture)
+        done (protocol/done-record (assoc record :auto-followup? true) "/receipt.edn" (apply str (repeat 64 "a")))
+        unknown {:outcome :unknown :fail nil :error nil}]
+    (is (= unknown (:parent_outcome done)) "Old/missing parent evidence cannot invent green")
+    (is (protocol/valid-record? :done done))
+    (doseq [bad [(dissoc done :parent_outcome)
+                 (assoc done :parent_outcome nil)
+                 (assoc done :parent_outcome {:outcome :pass :fail 1 :error 0})
+                 (assoc done :parent_outcome {:outcome :fail :fail 1 :error 1})
+                 (assoc done :parent_outcome {:outcome :unknown :fail 0 :error 0})
+                 (assoc done :parent_outcome {:outcome :pass :fail 0 :error 0 :extra true})]]
+      (is (not (protocol/valid-record? :done bad))))))
+
 (deftest uncovered-dead-reaped-and-recycled-pids
   (let [{:keys [dir token record] :as opts} (token-fixture)
         outside (str dir "/outside.clj")]

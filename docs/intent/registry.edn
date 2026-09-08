@@ -107,4 +107,10 @@
    :misreadings ["A matching digest makes inconsistent arithmetic valid." "Validation after publishing is sufficient."]
    :boundaries ["Forged but authenticated receipt" "Numeric mismatch" "Null counts" "Assertions disabled"]
    :tests [:inconsistent-arithmetic-cannot-be-published :inconsistent-authenticated-receipt-is-never-reader-pass]
-   :rationale "Item 4 grammar arithmetic question, records b3b02d33."}]}
+   :rationale "Item 4 grammar arithmetic question, records b3b02d33."}
+  {:id :AGENT-PARENT-OUTCOME-019 :status :active
+   :ears "When DONE describes an automatic follow-up, it shall carry the parent run's outcome and fail/error counts; missing parent evidence shall be unknown, never pass. STATUS/FOLLOW shall continue selecting the primary for its token."
+   :misreadings ["The last green DONE overrides a red primary." "A missing parent means zero failures."]
+   :boundaries ["Red parent" "Green parent" "Error parent" "Missing parent receipt" "Immutable replay" "Primary token"]
+   :tests [:followup-done-carries-parent-outcome :followup-parent-summary-grammar :parent-summary-never-replaces-primary-token-selection]
+   :rationale "Blind-reader witness case 4, clj-surgeon-records 2035d62a, docs/observations/2026-09-08-blind-reader-witness.md: derivable is not unavoidable."}]}
