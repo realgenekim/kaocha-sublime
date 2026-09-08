@@ -1,8 +1,8 @@
 {
-  "source_commit": "8ac3b78",
+  "source_commit": "a4da89b",
   "unit": {
-    "tests": 48,
-    "assertions": 347,
+    "tests": 49,
+    "assertions": 353,
     "fail": 0,
     "error": 0
   },
@@ -14,30 +14,30 @@
   "clean": {
     "kind": "clean",
     "exit": 0,
-    "wall_s": 2.7307297429069877,
+    "wall_s": 3.528424432966858,
     "streams": 1,
     "bytes": [
       1050
     ],
     "done": {
-      "receipt": "/var/tmp/forge/kaocha-agent-v1/clean/target/kaocha-runs/2026-09-08T19-15-55-117739985Z-9fddc13e-1a9c-4c8c-a757-e7fb92594b58.edn",
+      "receipt": "/var/tmp/forge/kaocha-agent-v1/clean/target/kaocha-runs/2026-09-08T19-29-23-008990389Z-0d8c20d0-1acc-481f-b555-d16ce5e5ac30.edn",
       "omitted": 0,
       "v": 1,
       "parent": null,
-      "candidate": "90096aab8c2aebfd5ccce0a1bc06ff4469168da46842032ab5ef8c4a3a16add2",
+      "candidate": "2e94156b11661a566f617e565851a72866cb5f108bae73e994c1c627488fa341",
       "tests": 1,
       "pending": 0,
       "auto_followup": false,
-      "wall_ms": 143,
+      "wall_ms": 142,
       "mode": "gate",
       "coverage": "complete",
       "outcome": "pass",
       "shown": 0,
       "skipped": 0,
       "fail": 0,
-      "id": "2026-09-08T19-15-55-117739985Z-9fddc13e-1a9c-4c8c-a757-e7fb92594b58",
+      "id": "2026-09-08T19-29-23-008990389Z-0d8c20d0-1acc-481f-b555-d16ce5e5ac30",
       "error": 0,
-      "sha256": "55b81fba0aff2519f261b182eeda875c46033679fdb257d6698330762b9bbc62",
+      "sha256": "2c7d89ea28c9e5721f56cda8c37aba94629df7bff2349d72ddd6159b0445df48",
       "pass": 1,
       "assertions": 1,
       "closure": {
@@ -49,30 +49,30 @@
   "fail25": {
     "kind": "fail25",
     "exit": 25,
-    "wall_s": 2.717467009089887,
+    "wall_s": 2.7918179761618376,
     "streams": 1,
     "bytes": [
-      11826
+      11806
     ],
     "done": {
-      "receipt": "/var/tmp/forge/kaocha-agent-v1/fail25/target/kaocha-runs/2026-09-08T19-15-59-393046976Z-247359df-9d14-4b30-999e-0c2afdb01b5e.edn",
+      "receipt": "/var/tmp/forge/kaocha-agent-v1/fail25/target/kaocha-runs/2026-09-08T19-29-27-316845095Z-82ecc766-be41-4b32-9274-ee91cfb9ac93.edn",
       "omitted": 5,
       "v": 1,
       "parent": null,
-      "candidate": "c79c40d13d99f2f5398370c069ce9666f0f9a6b3bc3244e943a329705a377a01",
+      "candidate": "e3a09e1865d226dfcf8ddf5e44a32cc98aca0c3ff6918f0e84261b7e6f0aface",
       "tests": 1,
       "pending": 0,
       "auto_followup": false,
-      "wall_ms": 147,
+      "wall_ms": 186,
       "mode": "gate",
       "coverage": "complete",
       "outcome": "fail",
       "shown": 20,
       "skipped": 0,
       "fail": 25,
-      "id": "2026-09-08T19-15-59-393046976Z-247359df-9d14-4b30-999e-0c2afdb01b5e",
+      "id": "2026-09-08T19-29-27-316845095Z-82ecc766-be41-4b32-9274-ee91cfb9ac93",
       "error": 0,
-      "sha256": "58389d2f034fe104436be57c6b5f3f404d2dcf577a121e0324f601cd172ad091",
+      "sha256": "dff91af4880ed9997d83cd493b8efa0f1faf65a524528fb9cf3ef6ee62560e9a",
       "pass": 0,
       "assertions": 25,
       "closure": {
@@ -84,63 +84,63 @@
   "clean_follow": {
     "kind": "follow-walls",
     "samples_ms": [
-      94.643518,
-      95.01738,
-      95.862307,
-      94.592082,
-      104.478882,
-      92.437359,
-      93.649369,
-      97.391581,
-      90.566013,
-      93.432263
+      92.876608,
+      105.177307,
+      97.594613,
+      94.528405,
+      93.267383,
+      89.147905,
+      111.829184,
+      105.698018,
+      87.659913,
+      88.504109
     ],
-    "median_ms": 94.6178,
-    "max_ms": 104.478882
+    "median_ms": 93.89789400000001,
+    "max_ms": 111.829184
   },
   "fail25_follow": {
     "kind": "fail25-follow-walls",
     "samples_ms": [
-      97.837278,
-      96.024098,
-      92.942045,
-      99.966832,
-      99.591248,
-      94.289426,
-      92.647964,
-      90.242896,
-      91.391789,
-      92.99211
+      95.593652,
+      99.231199,
+      93.460093,
+      92.487895,
+      89.444728,
+      92.276057,
+      96.361615,
+      98.81923,
+      103.324618,
+      99.176246
     ],
-    "median_ms": 93.64076800000001,
-    "max_ms": 99.966832
+    "median_ms": 95.9776335,
+    "max_ms": 103.324618
   },
   "mvr": {
     "kind": "mvr-full-suite-512m",
-    "pid": 792643,
+    "pid": 1130206,
     "specimen_sha": "9439370",
-    "wall_s": 17.71138830902055,
-    "peak_sampled_rss_kb": 680212,
-    "protocol_bytes": 1080,
+    "wall_s": 18.827819370198995,
+    "peak_sampled_rss_kb": 632148,
+    "protocol_bytes": 1088,
     "done": {
-      "receipt": "/var/tmp/forge/kaocha-agent-v1/mvr-acceptance/target/kaocha-runs/2026-09-08T19-13-43-229220788Z-152f728f-0e58-4712-96fd-2af65b7c1e28.edn",
+      "receipt": "/var/tmp/forge/kaocha-agent-v1/mvr-equality-final/target/kaocha-runs/2026-09-08T19-29-23-313555111Z-5180fd30-7028-495b-a5be-b53101d1fc0c.edn",
       "omitted": 0,
       "v": 1,
       "parent": null,
-      "candidate": "a00d9528755c0b46db6089542b532418ed1182027a56ce70d86f21f1b1543f11",
+      "candidate": "814b79693e43242aebe85e9a1548ef73db8f7cc7dcc4201f686ac65132f3b583",
       "tests": 579,
       "pending": 0,
       "auto_followup": false,
-      "wall_ms": 14198,
+      "wall_ms": 14606,
       "mode": "gate",
       "coverage": "complete",
       "outcome": "pass",
       "shown": 0,
       "skipped": 0,
       "fail": 0,
-      "id": "2026-09-08T19-13-43-229220788Z-152f728f-0e58-4712-96fd-2af65b7c1e28",
+      "id": "2026-09-08T19-29-23-313555111Z-5180fd30-7028-495b-a5be-b53101d1fc0c",
       "error": 0,
-      "sha256": "bdcdc67a038ff04d110355104d8febb193df8da4c8bad1c1c958ccf69afc11df",
+      "sha256": "a11808043d0967dead428b0b40f89448a4407196fd2b6e92816df54197dd8f28",
       "pass": 7833,
       "assertions": 7833,
       "closure": {
@@ -149,17 +149,17 @@
       }
     },
     "follow_samples_ms": [
-      135.574908,
-      126.620145,
-      142.690742,
-      136.569839,
-      137.716861,
-      145.935069,
-      147.301468,
-      132.220006,
-      132.614667,
-      127.588999
+      138.712137,
+      151.037312,
+      136.04017,
+      133.560109,
+      134.238177,
+      136.15436,
+      147.815501,
+      135.536133,
+      132.314079,
+      129.80057
     ],
-    "follow_median_ms": 136.0723735
+    "follow_median_ms": 135.7881515
   }
 }

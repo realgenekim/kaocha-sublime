@@ -1,22 +1,20 @@
 # Agent grammar v1 build evidence — 2026-09-08
 
-The accepted implementation is source commit `8ac3b78`. Subsequent commits add
+The accepted implementation is source commit `a4da89b`. Subsequent commits add
 harnesses, documentation and retained evidence only. `acceptance.json` indexes
 the final results. Every owned Kaocha JVM used `-Xms64m -Xmx512m`.
 
 ## Red first and final gates
 
 `red.log` precedes the implementation. `diff-schema-red.log`, `capture-red.log`,
-`heap-stale-red.log` and `trigger-red.log` preserve regression failures before
+`heap-stale-red.log`, `trigger-red.log`, and `equality-wrapper-red.log` preserve regression failures before
 their fixes. The trigger regression was run against source from `2b94d97` in an
-owned scratch directory. `unit-final.log` is 48 tests / 347 assertions, zero
+owned scratch directory. `unit-final.log` is 49 tests / 353 assertions, zero
 failures/errors; `lint-final.log` is zero errors/warnings through `~/bin/clj-kondo`.
 The normal suite enforces the bidirectional linked-intent registry.
 
 `process-final.log` / `process/agent_witnesses.json` contain the final cold and
-warm fixtures. The ten red-follow samples were appended afterward against the
-same frozen source and existing final receipt; the harness now includes that
-measurement on reproduction. `watch-final.log` / `process/agent_watch_witness.json`
+warm fixtures. Each clean/red follow timing has ten calls against a completed receipt. `watch-final.log` / `process/agent_watch_witness.json`
 contain the real watcher cases. `mvr-acceptance.log` /
 `process/agent_mvr_witness.json` contain the isolated MVR `9439370` full-suite run.
 `legacy-process.log`, `legacy-cli.log`, and `legacy-cli/` retain the earlier
@@ -55,7 +53,9 @@ in its JSON trace. This is a Linux-local witness, not a portable provisioning to
 
 Follow timings include a new Babashka status process each call, with an already
 completed receipt. They are absolute observed walls, not edit-to-verified walls or
-a performance comparison. MVR sampled RSS includes native/JVM overhead beyond the
+a performance comparison. The final process, watcher and MVR acceptance harnesses
+ran concurrently on the shared host; these are not idle-machine latency claims.
+MVR sampled RSS includes native/JVM overhead beyond the
 512 MiB Java heap. No independent blind-reader or matched crossover was performed;
 those remain Fable item 5. Adapter/launcher responsibilities are in
 `docs/agent-v1.md` (Fable item 4 and batch 5).

@@ -7,13 +7,13 @@ ERROR in sample.core-test/erroring (core_test.clj:5)
 Uncaught exception, not in assertion.
 Exception: clojure.lang.ExceptionInfo: intentional error
 {:reason :witness}
- at sample.core_test$fn__6350.invokeStatic (core_test.clj:5)
+ at sample.core_test$fn__6352.invokeStatic (core_test.clj:5)
     sample.core_test/fn (core_test.clj:5)
     kaocha.type.var$test_var.invokeStatic (var.clj:24)
     kaocha.type.var$test_var.invoke (var.clj:20)
-    kaocha.type.var$eval6390$fn__6392$wrapped_test__6395.invoke (var.clj:36)
+    kaocha.type.var$eval6392$fn__6394$wrapped_test__6397.invoke (var.clj:36)
     kaocha.plugin.capture_output$capture_output_pre_test_hook$fn__2257$fn__2258.invoke (capture_output.cljc:97)
-    kaocha.type.var$eval6390$fn__6392.invoke (var.clj:38)
+    kaocha.type.var$eval6392$fn__6394.invoke (var.clj:38)
     ...
     kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__2249$fn__2250.invoke (capture_output.cljc:88)
     ...
@@ -25,11 +25,11 @@ Exception: clojure.lang.ExceptionInfo: intentional error
     kaocha.testable$run_testable.invoke (testable.clj:158)
     kaocha.testable$run_testables.invokeStatic (testable.clj:224)
     kaocha.testable$run_testables.invoke (testable.clj:214)
-    kaocha.type.ns$run_tests$fn__6201.invoke (ns.clj:21)
+    kaocha.type.ns$run_tests$fn__6203.invoke (ns.clj:21)
     ...
     kaocha.type.ns$run_tests.invokeStatic (ns.clj:21)
     kaocha.type.ns$run_tests.invoke (ns.clj:16)
-    kaocha.type.ns$eval6219$fn__6220.invoke (ns.clj:61)
+    kaocha.type.ns$eval6221$fn__6222.invoke (ns.clj:61)
     ...
     kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__2249$fn__2250.invoke (capture_output.cljc:88)
     ...
@@ -43,7 +43,7 @@ Exception: clojure.lang.ExceptionInfo: intentional error
     kaocha.testable$run_testables.invoke (testable.clj:214)
     kaocha.test_suite$run.invokeStatic (test_suite.clj:7)
     kaocha.test_suite$run.invoke (test_suite.clj:5)
-    kaocha.type.clojure.test$eval6296$fn__6297.invoke (test.clj:18)
+    kaocha.type.clojure.test$eval6298$fn__6299.invoke (test.clj:18)
     ...
     kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__2249$fn__2250.invoke (capture_output.cljc:88)
     ...
@@ -87,4 +87,4 @@ Actual:
 
 PENDING sample.core-test/pending (sample/core_test.clj:6)
 
-RUN-RECEIPT /var/tmp/forge/kaocha-sublime-fx/cli/target/kaocha-runs/2026-09-08T19-19-27-002246939Z-e0283ed6-509a-49d3-af77-805a2278b944.edn
+RUN-RECEIPT /var/tmp/forge/kaocha-sublime-fx/cli/target/kaocha-runs/2026-09-08T19-30-51-643089628Z-425856ee-80d2-4e3f-ab58-feba7baaff00.edn
