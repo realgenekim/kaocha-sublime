@@ -77,4 +77,10 @@
    :misreadings ["Twenty events always fit 16 KiB." "Omitted failures can disappear from counts."]
    :boundaries ["25 failures" "Large fields" "Oversize identity"]
    :tests [:failure-budget-accounting]
-   :rationale "Agent grammar v1 build, 2026-09-08."}]}
+   :rationale "Agent grammar v1 build, 2026-09-08."}
+  {:id :AGENT-LEASE-014 :status :active
+   :ears "Every acquired run lease shall be released on completion, load failure, interruption, or publication failure; dead PID/start owners shall be reclaimed with typed evidence."
+   :misreadings ["Only post-run needs cleanup." "A PID alone identifies an owner."]
+   :boundaries ["Empty selection" "Load exception" "Interrupt" "Reservation failure" "PID reuse"]
+   :tests [:failed-load-releases-lease :dead-owner-reservation-is-reclaimed]
+   :rationale "Item 4 adapter defects, records b3b02d33, 2026-09-08."}]}

@@ -53,6 +53,17 @@ stderr share its capture buffer). Keep retention policy outside the test runner.
 around Kaocha's totals reduction: upstream discards extra keys. It preserves
 paths only on tagged suite results and refuses untested Kaocha versions.
 
+For direct `kaocha.api/run` in agent mode, require
+`kaocha.plugin.run-receipt` before the first call so its whole-run `finally`
+adapter is installed. CLI and REPL configuration already load the plugin before
+running. A first direct call that lazily loads the plugin from inside `api/run`
+refuses before acquiring a lease; subsequent calls use the installed adapter.
+Aborted agent runs retain typed `STATUS refused/protocol-error` evidence and
+release their leases, including on load errors and interrupts. Under the
+directory lock, a new run reclaims dead PID/start reservations, preserves the
+`INTERRUPTED` tombstone, and emits `STATUS killed/process-dead` for each reclaimed
+run ID in its stream. Readers continue to the new run's own completion record.
+
 A coldstart harness can put this line in its boot block after its initial probe:
 
 ```text

@@ -3,6 +3,7 @@
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
+            [kaocha.api :as api]
             [kaocha.hierarchy :as hierarchy]
             [kaocha.plugin :refer [defplugin]]
             [kaocha.plugin.capture-output :as capture]
@@ -14,6 +15,8 @@
             [kaocha-sublime.heap :as heap]
             [kaocha-sublime.image :as image]
             [kaocha-sublime.protocol :as protocol]
+            [kaocha-sublime.reap :as reap]
+            [kaocha-sublime.status :as status]
             [slingshot.slingshot :refer [throw+]])
   (:import (java.lang ProcessHandle)
            (java.nio.file Files StandardCopyOption OpenOption StandardOpenOption)
@@ -55,6 +58,34 @@
 
 (declare begin!)
 
+(def ^:dynamic *run-state* nil)
+
+;; INTENT: AGENT-LEASE-014
+(defn- release! [state]
+  (when-let [{:keys [lock channel released?]} (:lease state)]
+    (when (compare-and-set! released? false true)
+      (try
+        (when (.isValid ^java.nio.channels.FileLock lock) (.release ^java.nio.channels.FileLock lock))
+        (finally
+          (try (.close ^FileChannel channel)
+               (finally (.unlock image/run-lock)))))))
+  (when (= (:run-id state) (:run-id @image/active)) (reset! image/active nil)))
+
+(defn- cleanup! [state]
+  (when state
+    (try
+      (when (and (:events state) (not @(:committed? state)))
+        (swap! image/images update (:dir state) assoc :trusted? false)
+        (agent/refuse! state :protocol-error)
+        ;; REFUSED is the durable terminal evidence for this aborted run.
+        (Files/deleteIfExists (.toPath ^java.io.File (:tmp state))))
+      (finally (release! state)))))
+
+(defn- guarded-run [f config]
+  (binding [*run-state* (atom (get-in config [:kaocha.watch/tracker ::pending-state]))]
+    (try (f config)
+         (finally (cleanup! @*run-state*)))))
+
 (defn- adapt! [v wrap]
   (alter-var-root v #(if (::watch-adapter (meta %)) %
                         (with-meta (wrap %) {::watch-adapter true}))))
@@ -65,6 +96,16 @@
 
 ;; INTENT: STATUS-TRIGGER-003
 (defn- install-watch-adapter! []
+  (adapt! #'api/run (fn [f] (fn [config] (guarded-run f config))))
+  ;; A direct api/run may load this plugin from inside its first invocation.
+  ;; Its already-entered function cannot acquire the newly installed wrapper.
+  ;; Refuse before reservation; normal CLI/REPL config loads plugins first.
+  (adapt! #'watch/run-loop
+          (fn [f] (fn [& args]
+                    (try (apply f args)
+                         (finally
+                           (when (.isHeldByCurrentThread image/run-lock)
+                             (cleanup! @image/active)))))))
   (adapt! #'capture/make-buffer
           (fn [f] (fn [] (if-let [state @image/active] (agent/bounded-buffer! state) (f)))))
   (adapt! #'watch/qput
@@ -100,10 +141,12 @@
                                                            {::trigger {:files (batch events) :at at}
                                                             ::auto-followup? (not *waiting-for-edit?*)
                                                             ::last-path (::last-path tracker)})))))]
-                        (let [tracker (f q tracker paths)]
-                          (assoc tracker ::trigger {:files (batch @*watch-events*) :at at}
-                                         ::pending-state @pending
-                                         ::auto-followup? (not *waiting-for-edit?*))))))))
+                        (try
+                          (let [tracker (f q tracker paths)]
+                            (assoc tracker ::trigger {:files (batch @*watch-events*) :at at}
+                                           ::pending-state @pending
+                                           ::auto-followup? (not *waiting-for-edit?*)))
+                          (catch Throwable t (cleanup! @pending) (throw t))))))))
   (adapt! #'watch/wait-and-rescan!
           (fn [f] (fn [q tracker paths ignore]
                     (binding [*waiting-for-edit?* true *accepted-event* (atom nil)]
@@ -170,7 +213,7 @@
     (try
       (if-let [lock (.tryLock channel)]
         (if (and (zero? (.getHoldCount image/run-lock)) (.tryLock image/run-lock))
-          {:channel channel :lock lock}
+          {:channel channel :lock lock :released? (atom false)}
           (do (.release lock) (.close channel)
               (throw (ex-info "Another invocation owns this JVM" {:reason :protocol-error}))))
         (do (.close channel) (throw (ex-info "Another run owns this image" {:reason :protocol-error}))))
@@ -188,6 +231,11 @@
         tmp (io/file dir (str id ".edn.tmp"))
         _ (when (.exists path) (throw (ex-info "Receipt id already completed" {:path (str path)})))
         lease (when (::agent? config) (reserve-lock! dir))
+        pending (atom nil)]
+    (try
+      (let [dead (when lease (filterv #(= :dead (candidate/process-state %))
+                                     (keep candidate/read-edn (status/running-files (str dir)))))
+        _ (when (seq dead) (reap/reap! (str dir)))
         _ (Files/createFile (.toPath tmp) (make-array java.nio.file.attribute.FileAttribute 0))
         _ (when (.exists path)
             (Files/delete (.toPath tmp))
@@ -199,6 +247,7 @@
                :auto-followup? (true? (get-in config [:kaocha.watch/tracker ::auto-followup?]))
                :followup-of (get-in config [:kaocha.watch/tracker ::last-path])
                :config-hash (::config-hash config) :git-sha (git-sha)
+               :reclaimed dead
                :heap (or (::heap config) (heap/current (::heap-ceiling-bytes config 536870912)))}]
     (if (::agent? config)
       (let [session (::agent-session config)
@@ -208,13 +257,21 @@
                           :lease lease :attestation (atom {}) :configuration-valid? (atom true)})
             state (assoc state :candidate (candidate/candidate-id state))
             state (agent/new-stream! state)]
+        (reset! pending state)
         (reset! (:attestation state) {:exact? (image/admission-identity state)})
         (candidate/publish-session! dir session)
+        (Files/deleteIfExists (.toPath (io/file dir "REFUSED")))
         (reset! image/active state)
+        (when *run-state* (reset! *run-state* state))
         (spit tmp (edn-str (active-record state)))
         (agent/start! state)
+        (doseq [owner dead]
+          (agent/emit! state :status (protocol/status :killed :process-dead {:id (:run-id owner)})))
         state)
-      (do (spit tmp (edn-str (active-record state))) state))))
+      (do (spit tmp (edn-str (active-record state))) state)))
+      (catch Throwable t
+        (try (cleanup! @pending) (finally (release! {:lease lease})))
+        (throw t)))))
 
 (defn- totals [r]
   (let [{:kaocha.result/keys [count pass fail error pending]} (result/testable-totals r)]
@@ -316,10 +373,7 @@
     (reset! committed? true)
     (when (:events state)
       (try (agent/done! state receipt)
-           (finally
-             (.release ^java.nio.channels.FileLock (get-in state [:lease :lock]))
-             (.close ^FileChannel (get-in state [:lease :channel]))
-             (.unlock image/run-lock))))
+           (finally (release! state))))
     (-> (cond-> r (:kaocha.watch/tracker r)
           (update :kaocha.watch/tracker
                   #(-> % (dissoc ::pending-state)
@@ -338,6 +392,15 @@
                                              ::agent-session ::heap ::agent? :kaocha.plugin.randomize/seed
                                              :kaocha.watch/focus :kaocha.filter/focus)))
           config (agent-config config)]
+      (when (and (::agent? config) (nil? *run-state*)
+                 (some #(str/starts-with? (.getClassName ^StackTraceElement %) "kaocha.api$run")
+                       (.getStackTrace (Thread/currentThread))))
+        (let [state (agent/new-stream! {:dir (candidate/canonical (::dir config "target/kaocha-runs/"))
+                                       :run-id (str "refused-" (UUID/randomUUID))
+                                       :session image/session-id})]
+          (agent/refuse! state :protocol-error)
+          (throw+ {:kaocha/early-exit 2 :reason :protocol-error
+                   :message "Require kaocha.plugin.run-receipt before the first direct kaocha.api/run"})))
       ;; Reuse the reservation made when watch accepted the event, before rescan.
       ;; Initial watch runs reserve here, before reload. CLI config has no tracker.
       (if-let [tracker (:kaocha.watch/tracker config)]
@@ -373,3 +436,6 @@
                                    :identity (if (:exact? @(:attestation state)) :exact :unknown))))
     plan)
   (post-run [r] (finish! r)))
+
+;; Install before the first api/run when callers explicitly require the plugin.
+(install-watch-adapter!)
