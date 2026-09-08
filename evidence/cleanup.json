@@ -1,0 +1,10 @@
+{
+  "checked_at": "2026-09-08T17:05:54.207921+00:00",
+  "worktrees_removed": [
+    "mvr",
+    "ccfp"
+  ],
+  "tracked_files_clean_before_removal": true,
+  "owned_jvms_absent_before_removal": true,
+  "receipts_and_logs_retained": true
+}

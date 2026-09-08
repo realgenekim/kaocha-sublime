@@ -1,0 +1,8 @@
+mvr	fallback	change	7.761058	579 tests, 7833 assertions, 0 failures.
+mvr	fallback	restore	7.533040	579 tests, 7833 assertions, 0 failures.
+ccfp	source	change	37.917314	698 tests, 8994 assertions, 0 failures.
+ccfp	source	restore	36.340051	698 tests, 8994 assertions, 0 failures.
+ccfp	identity	change	35.590507	663 tests, 8804 assertions, 0 failures.
+ccfp	identity	restore	34.994740	663 tests, 8804 assertions, 0 failures.
+ccfp	fallback	change	68.547506	1021 tests, 12393 assertions, 0 failures.
+ccfp	fallback	restore	67.559736	1021 tests, 12393 assertions, 0 failures.

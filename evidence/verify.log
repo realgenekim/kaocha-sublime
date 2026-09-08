@@ -1,0 +1,10 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+{:specimen "mvr", :log "mvr-final", :runs 33, :one-receipt-per-summary true, :reporter-totals-equal true}
+{:specimen "mvr", :complete-receipts 35, :partial-receipts 0}
+{:specimen "ccfp", :log "ccfp", :runs 35, :one-receipt-per-summary true, :reporter-totals-equal true}
+{:specimen "ccfp", :log "ccfp-final", :runs 3, :one-receipt-per-summary true, :reporter-totals-equal true}
+{:specimen "ccfp", :complete-receipts 39, :partial-receipts 0}
+{:witness "source", :phase "change", :closure 202, :tracker-reload-equal true, :unrelated-excluded true, :totals {:tests 698, :assertions 8994, :pass 8994, :fail 0, :error 0, :pending 0}}
+{:witness "source", :phase "restore", :closure 202, :tracker-reload-equal true, :unrelated-excluded true, :totals {:tests 698, :assertions 8994, :pass 8994, :fail 0, :error 0, :pending 0}}
+{:witness "identity", :phase "change", :closure 149, :tracker-reload-equal true, :unrelated-excluded true, :totals {:tests 663, :assertions 8804, :pass 8804, :fail 0, :error 0, :pending 0}}
+{:witness "identity", :phase "restore", :closure 149, :tracker-reload-equal true, :unrelated-excluded true, :totals {:tests 663, :assertions 8804, :pass 8804, :fail 0, :error 0, :pending 0}}

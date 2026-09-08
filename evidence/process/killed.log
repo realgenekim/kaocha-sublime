@@ -1,0 +1,4 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+--- unit (clojure.test) ---------------------------
+sample.block-test
+  blocks-until-killed

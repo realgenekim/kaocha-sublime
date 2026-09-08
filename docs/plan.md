@@ -108,3 +108,6 @@ Implementation refinements from executable witnesses:
   closure in the tracker; only this immediate unchanged follow-up reuses it.
   A subsequent manual run still falls back full. The initial lost arm is retained.
 - Recheck destination after exclusive tmp reservation to close fixed-id races.
+- Specimen watchers do not signal root deps.edn saves. Prove deps fallback via
+  the explicit SHA CLI; use an existing watched resource for full-cost timing.
+  Snapshot sees root config changes on the next event; no event is fabricated.

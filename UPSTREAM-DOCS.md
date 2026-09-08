@@ -1,2 +1,4 @@
 # Upstream kaocha source + docs (Gene's pointer, 2026-09-08): https://github.com/lambdaisland/kaocha/tree/main/doc/plugins
 Local shallow clone for reading (do not modify): /var/tmp/forge/kaocha-src — plugin docs in doc/plugins/, hook reference in doc/ (see `kaocha.plugin` and `kaocha.hooks` namespaces under src/).
+
+Prior art from Gene (2026-09-08): kaocha PR #234 "Run tests in parallel" (open since 2021; futures per namespace in one JVM; serialized require; 6–10 % on I/O-bound suites; dynamic vars/atoms hazard) and https://andreacrotti.pro/2020-07-28-parallel-ci-kaocha/ (split namespaces across PROCESSES by historical timings via `kaocha.repl/test-plan`; ~4× on 4 shards; tail shard bounds the wall). Gene: "if we need to, feel free to fork kaocha" — prefer plugins; fork only for a missing hook, and name it.

@@ -1,0 +1,6 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+Execution error (FileAlreadyExistsException) at sun.nio.fs.UnixException/translateToIOException (UnixException.java:94).
+/var/tmp/forge/kaocha-sublime-fx/process/shared-receipts/same-id.edn.tmp
+
+Full report at:
+/var/tmp/forge/clojure-6033761373254821431.edn

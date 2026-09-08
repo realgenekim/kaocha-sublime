@@ -1,0 +1,187 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+--- unit (clojure.test) ---------------------------
+sample.core-test
+  pending
+  failing FAIL
+  erroring ERROR
+  passing
+
+Randomized with --seed 1673481052
+
+FAIL in sample.core-test/failing (core_test.clj:4)
+intentional failure
+Expected:
+  1
+Actual:
+  -1 +2
+╭───── Test output ───────────────────────────────────────────────────────
+│ owned-by-failing
+╰─────────────────────────────────────────────────────────────────────────
+
+ERROR in sample.core-test/erroring (core_test.clj:5)
+Uncaught exception, not in assertion.
+Exception: clojure.lang.ExceptionInfo: intentional error
+{:reason :witness}
+ at sample.core_test$fn__4927.invokeStatic (core_test.clj:5)
+    sample.core_test/fn (core_test.clj:5)
+    kaocha.type.var$test_var.invokeStatic (var.clj:24)
+    kaocha.type.var$test_var.invoke (var.clj:20)
+    kaocha.type.var$eval4967$fn__4969$wrapped_test__4972.invoke (var.clj:36)
+    kaocha.plugin.capture_output$capture_output_pre_test_hook$fn__984$fn__985.invoke (capture_output.cljc:97)
+    kaocha.type.var$eval4967$fn__4969.invoke (var.clj:38)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976$fn__977.invoke (capture_output.cljc:88)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976.doInvoke (capture_output.cljc:88)
+    ...
+    kaocha.testable$run.invokeStatic (testable.clj:129)
+    kaocha.testable$run.invoke (testable.clj:120)
+    kaocha.testable$run_testable.invokeStatic (testable.clj:211)
+    kaocha.testable$run_testable.invoke (testable.clj:158)
+    kaocha.testable$run_testables.invokeStatic (testable.clj:224)
+    kaocha.testable$run_testables.invoke (testable.clj:214)
+    kaocha.type.ns$run_tests$fn__4778.invoke (ns.clj:21)
+    ...
+    kaocha.type.ns$run_tests.invokeStatic (ns.clj:21)
+    kaocha.type.ns$run_tests.invoke (ns.clj:16)
+    kaocha.type.ns$eval4796$fn__4797.invoke (ns.clj:61)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976$fn__977.invoke (capture_output.cljc:88)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976.doInvoke (capture_output.cljc:88)
+    ...
+    kaocha.testable$run.invokeStatic (testable.clj:129)
+    kaocha.testable$run.invoke (testable.clj:120)
+    kaocha.testable$run_testable.invokeStatic (testable.clj:211)
+    kaocha.testable$run_testable.invoke (testable.clj:158)
+    kaocha.testable$run_testables.invokeStatic (testable.clj:224)
+    kaocha.testable$run_testables.invoke (testable.clj:214)
+    kaocha.test_suite$run.invokeStatic (test_suite.clj:7)
+    kaocha.test_suite$run.invoke (test_suite.clj:5)
+    kaocha.type.clojure.test$eval4873$fn__4874.invoke (test.clj:18)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976$fn__977.invoke (capture_output.cljc:88)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976.doInvoke (capture_output.cljc:88)
+    ...
+    kaocha.testable$run.invokeStatic (testable.clj:129)
+    kaocha.testable$run.invoke (testable.clj:120)
+    kaocha.testable$run_testable.invokeStatic (testable.clj:211)
+    kaocha.testable$run_testable.invoke (testable.clj:158)
+    kaocha.testable$run_testables.invokeStatic (testable.clj:224)
+    kaocha.testable$run_testables.invoke (testable.clj:214)
+    kaocha.api$run$fn__2943$fn__2947$fn__2948.invoke (api.clj:159)
+    ...
+    kaocha.api$run$fn__2943$fn__2947.invoke (api.clj:133)
+    ...
+    kaocha.api$run$fn__2943.invoke (api.clj:132)
+    ...
+    kaocha.api$run.invokeStatic (api.clj:110)
+    kaocha.api$run.invoke (api.clj:97)
+    kaocha.repl$run.invokeStatic (repl.clj:156)
+    kaocha.repl$run.doInvoke (repl.clj:124)
+    ...
+    kaocha_sublime.driver$_main.invokeStatic (driver.clj:20)
+    kaocha_sublime.driver$_main.doInvoke (driver.clj:4)
+    ...
+4 tests, 3 assertions, 1 errors, 1 pending, 1 failures.
+
+PENDING sample.core-test/pending (sample/core_test.clj:6)
+
+RUN-RECEIPT /var/tmp/forge/kaocha-sublime-fx/process/warm/receipts/2026-09-08T16-49-41-499873816Z-c4006709-b434-48a1-8fc5-c72e2991db06.edn
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+--- unit (clojure.test) ---------------------------
+sample.core-test
+  pending
+  failing FAIL
+  passing
+  erroring ERROR
+
+Randomized with --seed 1908170537
+
+FAIL in sample.core-test/failing (core_test.clj:4)
+intentional failure
+Expected:
+  1
+Actual:
+  -1 +2
+╭───── Test output ───────────────────────────────────────────────────────
+│ owned-by-failing
+╰─────────────────────────────────────────────────────────────────────────
+
+ERROR in sample.core-test/erroring (core_test.clj:5)
+Uncaught exception, not in assertion.
+Exception: clojure.lang.ExceptionInfo: intentional error
+{:reason :witness}
+ at sample.core_test$fn__4927.invokeStatic (core_test.clj:5)
+    sample.core_test/fn (core_test.clj:5)
+    kaocha.type.var$test_var.invokeStatic (var.clj:24)
+    kaocha.type.var$test_var.invoke (var.clj:20)
+    kaocha.type.var$eval4967$fn__4969$wrapped_test__4972.invoke (var.clj:36)
+    kaocha.plugin.capture_output$capture_output_pre_test_hook$fn__984$fn__985.invoke (capture_output.cljc:97)
+    kaocha.type.var$eval4967$fn__4969.invoke (var.clj:38)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976$fn__977.invoke (capture_output.cljc:88)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976.doInvoke (capture_output.cljc:88)
+    ...
+    kaocha.testable$run.invokeStatic (testable.clj:129)
+    kaocha.testable$run.invoke (testable.clj:120)
+    kaocha.testable$run_testable.invokeStatic (testable.clj:211)
+    kaocha.testable$run_testable.invoke (testable.clj:158)
+    kaocha.testable$run_testables.invokeStatic (testable.clj:224)
+    kaocha.testable$run_testables.invoke (testable.clj:214)
+    kaocha.type.ns$run_tests$fn__4778.invoke (ns.clj:21)
+    ...
+    kaocha.type.ns$run_tests.invokeStatic (ns.clj:21)
+    kaocha.type.ns$run_tests.invoke (ns.clj:16)
+    kaocha.type.ns$eval4796$fn__4797.invoke (ns.clj:61)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976$fn__977.invoke (capture_output.cljc:88)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976.doInvoke (capture_output.cljc:88)
+    ...
+    kaocha.testable$run.invokeStatic (testable.clj:129)
+    kaocha.testable$run.invoke (testable.clj:120)
+    kaocha.testable$run_testable.invokeStatic (testable.clj:211)
+    kaocha.testable$run_testable.invoke (testable.clj:158)
+    kaocha.testable$run_testables.invokeStatic (testable.clj:224)
+    kaocha.testable$run_testables.invoke (testable.clj:214)
+    kaocha.test_suite$run.invokeStatic (test_suite.clj:7)
+    kaocha.test_suite$run.invoke (test_suite.clj:5)
+    kaocha.type.clojure.test$eval4873$fn__4874.invoke (test.clj:18)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976$fn__977.invoke (capture_output.cljc:88)
+    ...
+    kaocha.plugin.capture_output$capture_output_wrap_run_hook$fn__976.doInvoke (capture_output.cljc:88)
+    ...
+    kaocha.testable$run.invokeStatic (testable.clj:129)
+    kaocha.testable$run.invoke (testable.clj:120)
+    kaocha.testable$run_testable.invokeStatic (testable.clj:211)
+    kaocha.testable$run_testable.invoke (testable.clj:158)
+    kaocha.testable$run_testables.invokeStatic (testable.clj:224)
+    kaocha.testable$run_testables.invoke (testable.clj:214)
+    kaocha.api$run$fn__2943$fn__2947$fn__2948.invoke (api.clj:159)
+    ...
+    kaocha.api$run$fn__2943$fn__2947.invoke (api.clj:133)
+    ...
+    kaocha.api$run$fn__2943.invoke (api.clj:132)
+    ...
+    kaocha.api$run.invokeStatic (api.clj:110)
+    kaocha.api$run.invoke (api.clj:97)
+    kaocha.repl$run.invokeStatic (repl.clj:156)
+    kaocha.repl$run.doInvoke (repl.clj:124)
+    ...
+    kaocha_sublime.driver$_main.invokeStatic (driver.clj:20)
+    kaocha_sublime.driver$_main.doInvoke (driver.clj:4)
+    ...
+4 tests, 3 assertions, 1 errors, 1 pending, 1 failures.
+
+PENDING sample.core-test/pending (sample/core_test.clj:6)
+
+RUN-RECEIPT /var/tmp/forge/kaocha-sublime-fx/process/warm/receipts/2026-09-08T16-49-42-500620952Z-962f3a22-0751-4e49-8cf2-d8c2ff7f9414.edn
