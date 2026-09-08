@@ -179,6 +179,13 @@
          (when (zero? exit) (str/trim out)))
        (catch Exception _ nil)))
 
+;; INTENT: AGENT-REFUSAL-ID-016
+(defn- new-run-id [prefix]
+  (let [id (or (System/getenv "KAOCHA_RUN_ID") (str prefix "-" (UUID/randomUUID)))]
+    (when-not (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]{0,199}" id)
+      (throw (ex-info "Unsafe KAOCHA_RUN_ID" {:run-id id :reason :protocol-error})))
+    id))
+
 (defn- agent-config [config]
   (let [reporters (:kaocha/reporter config)
         enabled? (or (::agent? config) (= "1" (System/getenv "KAOCHA_AGENT"))
@@ -187,7 +194,7 @@
       (let [dir (candidate/canonical (::dir config "target/kaocha-runs/"))
             caps (heap/current (::heap-ceiling-bytes config 536870912))]
         (when-not (:admitted? caps)
-          (let [state (agent/new-stream! {:dir dir :run-id (str "refused-" (UUID/randomUUID))
+          (let [state (agent/new-stream! {:dir dir :run-id (new-run-id "refused")
                                            :mode (image/mode config) :session image/session-id})]
             (candidate/publish-session! dir {:workspace (candidate/canonical ".")
                                               :session image/session-id
@@ -221,10 +228,7 @@
 
 (defn- begin! [config]
   (let [started (str (Instant/now))
-        id (or (System/getenv "KAOCHA_RUN_ID")
-               (str (str/replace started #"[:.]" "-") "-" (UUID/randomUUID)))
-        _ (when-not (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]{0,199}" id)
-            (throw (ex-info "Unsafe KAOCHA_RUN_ID" {:run-id id})))
+        id (new-run-id (str/replace started #"[:.]" "-"))
         dir (.getCanonicalFile (io/file (::dir config "target/kaocha-runs/")))
         _ (Files/createDirectories (.toPath dir) (make-array java.nio.file.attribute.FileAttribute 0))
         path (io/file dir (str id ".edn"))
@@ -421,7 +425,7 @@
                  (some #(str/starts-with? (.getClassName ^StackTraceElement %) "kaocha.api$run")
                        (.getStackTrace (Thread/currentThread))))
         (let [state (agent/new-stream! {:dir (candidate/canonical (::dir config "target/kaocha-runs/"))
-                                       :run-id (str "refused-" (UUID/randomUUID))
+                                       :run-id (new-run-id "refused")
                                        :session image/session-id})]
           (agent/refuse! state :protocol-error)
           (throw+ {:kaocha/early-exit 2 :reason :protocol-error

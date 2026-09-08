@@ -89,4 +89,10 @@
    :misreadings ["Every skip is missing coverage." "Every skip is declared by the gate."]
    :boundaries ["Nested skips" "Namespace metadata" "Focused Var" "Fail-fast" "All skipped"]
    :tests [:declared-skips-complete-the-gate :focus-still-leaves-missing-coverage]
-   :rationale "Fable's declared-gate ruling, item 4 ccfp witness, records b3b02d33."}]}
+   :rationale "Fable's declared-gate ruling, item 4 ccfp witness, records b3b02d33."}
+  {:id :AGENT-REFUSAL-ID-016 :status :active
+   :ears "When a launcher supplies KAOCHA_RUN_ID, pre-load heap refusals shall use that validated ID and its addressable event stream."
+   :misreadings ["Refusals may silently invent another ID." "Unsafe refusal IDs need no validation."]
+   :boundaries ["Missing cap" "Policy ceiling" "Unsafe ID" "Existing stream"]
+   :tests [:heap-refusal-honors-launcher-id]
+   :rationale "Item 4 launcher directory-diff workaround, records b3b02d33."}]}

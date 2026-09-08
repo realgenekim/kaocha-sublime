@@ -2,6 +2,7 @@
   (:refer-clojure :exclude [run!])
   (:import (java.lang ProcessHandle))
   (:require [clojure.java.io :as io]
+            [clojure.java.shell :as shell]
             [clojure.test :refer [deftest is]]
             [kaocha.api :as api]
             [kaocha.testable :as testable]
@@ -117,3 +118,22 @@
     (is (= :partial (:coverage r)))
     (is (= :incomplete (protocol/outcome (:totals r) (:coverage r))))
     (is (= 2 (get-in r [:totals :skipped])))))
+
+;; INTENT-TEST: AGENT-REFUSAL-ID-016
+(deftest heap-refusal-honors-launcher-id
+  (let [dir (temp-dir) id "launcher-owned-heap-refusal"
+        code (str "(require '[kaocha.api :as api] '[kaocha-sublime.receipt-test :as fixture])"
+                  "(try (api/run (assoc (fixture/fixture-config " (pr-str dir) ")"
+                  " :kaocha.plugin.run-receipt/agent? true :kaocha.plugin.run-receipt/heap-ceiling-bytes 1))"
+                  " (catch clojure.lang.ExceptionInfo e (System/exit (or (:kaocha/early-exit (ex-data e)) 99))))")
+        result (shell/sh "java" "-Xms64m" "-Xmx512m" "-cp" (System/getProperty "java.class.path")
+                         "clojure.main" "-e" code :env (assoc (into {} (System/getenv)) "KAOCHA_RUN_ID" id))
+        path (io/file dir (str id ".events"))]
+    (is (= 2 (:exit result)))
+    (is (.exists path))
+    (when (.exists path)
+      (let [events (records path)]
+        (is (= ["STATUS"] (mapv first events)))
+        (is (= id (get-in events [0 1 :id])))
+        (is (= "heap-cap" (get-in events [0 1 :reason])))))
+    (is (not (.exists (io/file dir "LATEST"))))))

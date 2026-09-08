@@ -34,6 +34,8 @@ Every run reserves `<id>.edn.tmp` while in progress. Completion writes
 A killed test has no completed verdict. IDs default to
 UTC plus UUID. `KAOCHA_RUN_ID` overrides the ID and must be unique for each run;
 reuse or unsafe path characters fail loudly. Files are never overwritten.
+Admission refusals, including heap-cap refusal before loading, honor the same
+`KAOCHA_RUN_ID` and publish to `<id>.events`; launchers need no directory diff.
 The last line of normal run output is `RUN-RECEIPT <absolute path>`.
 Watch lifecycle messages can follow this marker.
 
