@@ -1,0 +1,29 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+SLF4J: Failed to load class "org.slf4j.impl.StaticLoggerBinder".
+SLF4J: Defaulting to no-operation (NOP) logger implementation
+SLF4J: See http://www.slf4j.org/codes.html#StaticLoggerBinder for further details.
+AFFECTED FULL: changed set unknown (initial run or no tracker snapshot)
+AFFECTED 1/1 namespaces from 0 changed files
+
+[watch] Reloading #{agent-case.core-test}
+AFFECTED 1/1 namespaces from 1 changed files
+
+[watch] Re-running failed tests #{:agent-case.core-test/clean}
+AFFECTED 1/1 namespaces from 1 changed files
+
+[watch] Failed tests pass, re-running all tests.
+AFFECTED 1/1 namespaces from 0 changed files
+
+[watch] Reloading #{agent-case.core-test}
+AFFECTED FULL: watch reload failed
+AFFECTED 0/0 namespaces from 1 changed files
+
+[watch] Error reloading, all tests skipped.
+[watch] Reloading #{agent-case.core-test}
+AFFECTED 1/1 namespaces from 1 changed files
+
+AFFECTED FULL: non-namespace, missing, or unsupported changed file: /var/tmp/forge/kaocha-agent-v1/watch/src/agent_case/spare.clj
+AFFECTED 1/1 namespaces from 1 changed files
+
+[watch] Reloading #{agent-case.core-test}
+AFFECTED 1/1 namespaces from 1 changed files

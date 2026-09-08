@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/home/forge/src/kaocha-sublime/scripts/agent_mvr_witness.py", line 48, in <module>
+    assert answer[0] == 0 and answer[1] == 'RUN-DONE', answer
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: (2, 'STATUS', {'receipt': '/var/tmp/forge/kaocha-agent-v1/mvr/target/kaocha-runs/2026-09-08T18-24-47-932131536Z-0030fa54-3ea6-4ed6-a96e-9f9c5d20a3b0.edn', 'identity': 'exact', 'elapsed_ms': None, 'v': 1, 'phase': 'unknown', 'state': 'uncovered', 'token': '597a29548cb9d1a2c94e00e3e44635a8326103b82b7305f0c2a4d7c7443cabac', 'reason': 'scope-missing', 'active': None, 'id': '2026-09-08T18-24-47-932131536Z-0030fa54-3ea6-4ed6-a96e-9f9c5d20a3b0'}, 60.757884, 'STATUS {"receipt":"/var/tmp/forge/kaocha-agent-v1/mvr/target/kaocha-runs/2026-09-08T18-24-47-932131536Z-0030fa54-3ea6-4ed6-a96e-9f9c5d20a3b0.edn","identity":"exact","elapsed_ms":null,"v":1,"phase":"unknown","state":"uncovered","token":"597a29548cb9d1a2c94e00e3e44635a8326103b82b7305f0c2a4d7c7443cabac","reason":"scope-missing","active":null,"id":"2026-09-08T18-24-47-932131536Z-0030fa54-3ea6-4ed6-a96e-9f9c5d20a3b0"}\n')

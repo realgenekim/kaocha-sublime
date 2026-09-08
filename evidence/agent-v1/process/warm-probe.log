@@ -1,0 +1,3 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+{:kaocha.result/count 1, :kaocha.result/pass 1, :kaocha.result/error 0, :kaocha.result/fail 0, :kaocha.result/pending 0, :kaocha.plugin.run-receipt/path "/var/tmp/forge/kaocha-agent-v1/warm-probe/target/kaocha-runs/2026-09-08T19-16-13-349122107Z-9cd802c8-dc93-4b86-ac12-74ef343d25bb.edn"}
+{:kaocha.result/count 1, :kaocha.result/pass 1, :kaocha.result/error 0, :kaocha.result/fail 0, :kaocha.result/pending 0, :kaocha.plugin.run-receipt/path "/var/tmp/forge/kaocha-agent-v1/warm-probe/target/kaocha-runs/2026-09-08T19-16-13-545919611Z-6f6546eb-3bc8-4d21-b40f-905d1864d3bd.edn"}

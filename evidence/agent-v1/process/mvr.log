@@ -1,0 +1,4 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+GUARDRAILS IS ENABLED. RUNTIME PERFORMANCE WILL BE AFFECTED.
+Mode: :runtime  config: {:throw? true}
+Guardrails was enabled because the guardrails.enabled property is set to a (any) value.
