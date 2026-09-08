@@ -35,7 +35,7 @@ STATUS     := v:1, state:(marked|waiting|running|late|timeout|killed|superseded|
               reason:enum, active:(absolute-path|null), receipt:(absolute-path|null)
 enum       := fixed registered ASCII symbol; initial reasons: none, save-unobserved,
               over-p95, deadline, process-dead, candidate-changed, scope-missing,
-              no-receipt, identity-unproved, heap-cap, protocol-error
+              no-receipt, identity-unproved, heap-cap, load-error, protocol-error
 string     := JSON-escaped; every control/non-ASCII code point escaped, including ESC/DEL
               and bidi separators; quotes/backslashes escaped; no literal caller newlines
 null       := unknown/unavailable, never zero, never the text "nil" as missing evidence
@@ -81,6 +81,11 @@ witness case 4 (clj-surgeon-records `2035d62a`,
 
 A DONE with inconsistent arithmetic (`assertions != pass + fail + error`) is a
 **protocol-error**, never pass and never merely an ordinary red test result.
+
+A supported probe that cannot reload a target emits `FAIL kind=load`, then
+`STATUS state=refused reason=load-error` (exit 2). The stream is readable; the
+target could not load. The lease is released and the next probe can run in the
+same image. This reason does not replace `protocol-error` for malformed records.
 Readers must validate the counts before interpreting `outcome`, even when the
 receipt digest matches. Null assertion counts must be consistently null, not
 mixed with numeric assertion counts. Reject contradictory outcomes as specified

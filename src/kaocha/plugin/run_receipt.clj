@@ -491,7 +491,11 @@
              (catch Throwable t
                (when (:events state)
                  (agent/failure! state {:type :error :actual t
-                                        :kaocha/testable {:kaocha.testable/load-error t}}))
+                                        :kaocha/testable {:kaocha.testable/load-error t}})
+                 ;; INTENT: AGENT-LOAD-REASON-021
+                 ;; Close with the load diagnosis before finally releases the lease.
+                 ;; An unreadable namespace is not an unreadable protocol record.
+                 (agent/refuse! state :load-error))
                (throw t))))
       (assoc config ::state state
              :kaocha/reporter

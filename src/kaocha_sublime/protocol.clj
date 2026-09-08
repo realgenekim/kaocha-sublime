@@ -200,7 +200,7 @@
        (case kind
          :status (and (contains? #{:marked :waiting :running :late :timeout :killed :superseded :uncovered :unavailable :refused} (:state r))
                       (contains? #{:none :save-unobserved :over-p95 :deadline :process-dead :candidate-changed :scope-missing
-                                   :no-receipt :identity-unproved :heap-cap :protocol-error} (:reason r))
+                                   :no-receipt :identity-unproved :heap-cap :load-error :protocol-error} (:reason r))
                       (contains? #{:exact :unknown} (:identity r))
                       (contains? #{:queued :load :run :unknown} (:phase r))
                       (nullable? uint? (:elapsed_ms r))
