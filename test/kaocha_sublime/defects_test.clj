@@ -189,3 +189,29 @@
     (let [good @(future (probe-run '[declared-gate-test] cfg))]
       (is (= 0 (:exit good)))
       (is (= "pass" (get-in (last (records (:events good))) [1 :outcome]))))))
+
+;; INTENT-TEST: AGENT-ARITHMETIC-018
+(deftest inconsistent-arithmetic-cannot-be-published
+  (let [dir (temp-dir) cfg (skip-fixture dir) original @#'receipt/totals
+        result (with-redefs-fn {#'receipt/totals (fn [r] (update (original r) :assertions inc))}
+                 #(run! cfg))
+        files (file-seq (io/file dir "runs"))
+        events (mapcat records (filter #(.endsWith (.getName %) ".events") files))]
+    (is (instance? Throwable result))
+    (is (not (.exists (io/file dir "runs/LATEST"))))
+    (is (not-any? #(.endsWith (.getName %) ".edn") files))
+    (is (= ["RUN-START" "STATUS"] (mapv first events)))
+    (is (= "protocol-error" (get-in (last events) [1 :reason])))
+    (is (not (.isLocked image/run-lock)))))
+
+;; INTENT-TEST: AGENT-ARITHMETIC-018
+(deftest inconsistent-authenticated-receipt-is-never-reader-pass
+  (let [{:keys [dir record] :as opts} (kaocha-sublime.agent-test/token-fixture)
+        r (assoc-in record [:totals :assertions] 999)
+        path (kaocha-sublime.agent-test/publish-token! dir r)
+        done (protocol/done-record r path (candidate/file-hash path))
+        response (status/observe opts)]
+    (is (not (protocol/valid-record? :done done)))
+    (is (thrown? clojure.lang.ExceptionInfo (protocol/record-line :done done)))
+    (is (= 2 (:exit response)))
+    (is (= :protocol-error (get-in response [:record :reason])))))

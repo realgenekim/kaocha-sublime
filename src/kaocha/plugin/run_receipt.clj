@@ -398,8 +398,14 @@
                   (assoc :tests (mapv test-outcome (filter #(= :kaocha.type/var (:kaocha.testable/type %)) nodes))))]
     ;; Keep the running reservation (and its PID) through BOTH publications.
     ;; Killing between receipt rename and LATEST rename must not expose old green.
-    (let [ready (io/file (str path ".ready"))]
-      (Files/write (.toPath ready) (.getBytes (str (edn-str receipt) "\n") "UTF-8") (make-array OpenOption 0))
+    (let [ready (io/file (str path ".ready"))
+          bytes (.getBytes (str (edn-str receipt) "\n") "UTF-8")]
+      ;; INTENT: AGENT-ARITHMETIC-018
+      ;; Validate the exact projection before any receipt or pointer publication.
+      ;; record-line is unconditional, including when Clojure *assert* is false.
+      (when (:events state)
+        (protocol/record-line :done (protocol/done-record receipt path (sha256 bytes))))
+      (Files/write (.toPath ready) bytes (make-array OpenOption 0))
       (Files/move (.toPath ready) (.toPath path) (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE])))
     (publish-latest! path receipt)
     (Files/delete (.toPath tmp))

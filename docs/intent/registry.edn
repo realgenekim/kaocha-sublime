@@ -101,4 +101,10 @@
    :misreadings ["require :reload removes definitions." "Reloading named namespaces attests all loaded dependencies."]
    :boundaries ["Deleted red Var" "Deleted green Var" "Missing namespace" "Dependency order" "Reload disabled"]
    :tests [:deleted-test-vars-do-not-survive-probes]
-   :rationale "Item 4 warm adapter stale-Var witness, records b3b02d33."}]}
+   :rationale "Item 4 warm adapter stale-Var witness, records b3b02d33."}
+  {:id :AGENT-ARITHMETIC-018 :status :active
+   :ears "An inconsistent DONE assertion sum shall be a protocol-error for readers, and the emitter shall reject its projection before publishing the receipt or LATEST."
+   :misreadings ["A matching digest makes inconsistent arithmetic valid." "Validation after publishing is sufficient."]
+   :boundaries ["Forged but authenticated receipt" "Numeric mismatch" "Null counts" "Assertions disabled"]
+   :tests [:inconsistent-arithmetic-cannot-be-published :inconsistent-authenticated-receipt-is-never-reader-pass]
+   :rationale "Item 4 grammar arithmetic question, records b3b02d33."}]}

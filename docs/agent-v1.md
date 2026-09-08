@@ -56,6 +56,16 @@ compat     := PROBE/GATE adapters map to mode; no second summary; unknown versio
               malformed/oversize/conflicting record => protocol-error, never success
 ```
 
+A DONE with inconsistent arithmetic (`assertions != pass + fail + error`) is a
+**protocol-error**, never pass and never merely an ordinary red test result.
+Readers must validate the counts before interpreting `outcome`, even when the
+receipt digest matches. Null assertion counts must be consistently null, not
+mixed with numeric assertion counts. Reject contradictory outcomes as specified
+by the grammar as well. The emitter validates its complete DONE projection
+before publishing either the receipt or LATEST; invalid totals yield typed
+refusal evidence without a committed result. This check does not depend on
+Clojure's optional assertion setting.
+
 ## Implementation and acceptance
 
 `kaocha-sublime.protocol` owns the shared encoder and DONE projection.
