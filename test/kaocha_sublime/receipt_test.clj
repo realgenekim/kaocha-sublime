@@ -6,7 +6,9 @@
             [kaocha.api :as api] [kaocha.config :as config]
             [kaocha.repl :as repl] [kaocha.result :as result]
             [kaocha.plugin.run-receipt :as receipt]
-            [kaocha.watch :as watch])
+            [kaocha-sublime.status :as status]
+            [kaocha.watch :as watch]
+            [lambdaisland.tools.namespace.dir :as ns-dir])
   (:import (java.nio.file Files)))
 
 (defn temp-dir [] (str (Files/createTempDirectory "kaocha-sublime-" (make-array java.nio.file.attribute.FileAttribute 0))))
@@ -47,7 +49,8 @@
   (let [dir (temp-dir) a (io/file dir "a.clj") b (io/file dir "b.clj")
         q (watch/make-queue)]
     (spit a "(ns a)") (spit b "(ns b)")
-    (watch/qput q a) (watch/qput q b)
+    ;; Beholder reports java.nio.file.Path; Hawk reports java.io.File.
+    (watch/qput q (.toPath a)) (watch/qput q b)
     (let [[tracker _] (watch/wait-and-rescan! q {} [(io/file dir)] [])]
       (is (= [(str a) (str b)] (get-in tracker [:kaocha.plugin.run-receipt/trigger :files])))
       (is (false? (:kaocha.plugin.run-receipt/auto-followup? tracker)))
@@ -59,6 +62,37 @@
       (let [[manual _] (watch/wait-and-rescan! q tracker [(io/file dir)] [])]
         (is (false? (:kaocha.plugin.run-receipt/auto-followup? manual)))
         (is (= [] (get-in manual [:kaocha.plugin.run-receipt/trigger :files])))))))
+
+(deftest running-reservation-precedes-watcher-scan
+  (receipt/run-receipt-config-hook {})
+  (let [dir (temp-dir) q (watch/make-queue) file (io/file dir "a.clj")]
+    (spit file "(ns a)")
+    (watch/qput q (.toPath file))
+    (with-redefs [ns-dir/scan-dirs
+                  (fn [tracker _]
+                    (let [running (filter #(str/ends-with? (.getName %) ".edn.tmp")
+                                          (.listFiles (io/file dir)))]
+                      (is (= 1 (count running)) "RUNNING covers rescan, not just test execution")
+                      (when (seq running)
+                        (is (= :running (:status (edn/read-string (slurp (first running))))))))
+                    tracker)]
+      (watch/wait-and-rescan! q {:kaocha.plugin.run-receipt/settings
+                                 {:kaocha.plugin.run-receipt/dir dir}}
+                             [(io/file dir)] []))))
+
+(deftest interrupted-publication-does-not-expose-old-verdict
+  (let [dir (temp-dir) cfg (fixture-config dir)]
+    (with-out-str
+      (binding [clojure.test/*test-out* *out* clojure.test/*report-counters* nil]
+        (api/run cfg)
+        (let [before (slurp (io/file dir "LATEST"))]
+          (with-redefs-fn {#'receipt/publish-latest!
+                          (fn [_ _] (throw (ex-info "publication interrupted" {})))}
+            #(is (thrown-with-msg? clojure.lang.ExceptionInfo #"publication interrupted" (api/run cfg))))
+          (is (= before (slurp (io/file dir "LATEST"))))
+          (is (= 2 (count (filter #(str/ends-with? (.getName %) ".edn")
+                                 (.listFiles (io/file dir))))))
+          (is (str/starts-with? (status/status-line {:dir dir}) "KAOCHA-STATUS RUNNING ")))))))
 
 (deftest complete-receipt-matches-reporter-and-capture
   (let [dir (temp-dir) r (atom nil)

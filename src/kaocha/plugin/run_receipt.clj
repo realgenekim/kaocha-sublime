@@ -6,7 +6,8 @@
             [kaocha.hierarchy :as hierarchy]
             [kaocha.plugin :refer [defplugin]]
             [kaocha.result :as result]
-            [kaocha.testable :as testable])
+            [kaocha.testable :as testable]
+            [kaocha.watch :as watch])
   (:import (java.lang ProcessHandle)
            (java.nio.file Files StandardCopyOption OpenOption)
            (java.security MessageDigest)
@@ -38,6 +39,52 @@
 (defn kaocha-version []
   (with-open [r (io/reader (io/resource "META-INF/maven/lambdaisland/kaocha/pom.properties"))]
     (let [p (Properties.)] (.load p r) (.getProperty p "version"))))
+
+(def ^:dynamic *watch-events* nil)
+(def ^:dynamic *waiting-for-edit?* false)
+
+(declare begin!)
+
+(defn- adapt! [v wrap]
+  (alter-var-root v #(if (::watch-adapter (meta %)) %
+                        (with-meta (wrap %) {::watch-adapter true}))))
+
+(defn- event-files [events]
+  (->> events (remove keyword?) (map #(-> % str io/file .getCanonicalPath))
+       distinct sort vec))
+
+;; INTENT: STATUS-TRIGGER-003
+(defn- install-watch-adapter! []
+  ;; Kaocha 1.91.1392 discards both the drained events and the run-loop branch.
+  ;; These wrappers observe its real queue; they neither manufacture events nor
+  ;; change reload/selection. Only run-loop's automatic branch rescans outside wait.
+  (adapt! #'watch/drain-queue!
+          (fn [f] (fn [q]
+                    (let [events (f q)]
+                      (when *watch-events* (swap! *watch-events* into events))
+                      events))))
+  (adapt! #'watch/drain-and-rescan!
+          (fn [f] (fn [q tracker paths]
+                    (binding [*watch-events* (atom [])]
+                      (let [at (str (Instant/now))
+                            pending (when-let [settings (::settings tracker)]
+                                      (begin! (assoc settings :kaocha.watch/tracker
+                                                     {::trigger {:files [] :at at}
+                                                      ::auto-followup? (not *waiting-for-edit?*)
+                                                      ::last-path (::last-path tracker)})))
+                            tracker (f q tracker paths)]
+                        (assoc tracker ::trigger {:files (event-files @*watch-events*) :at at}
+                               ::pending-state pending
+                               ::auto-followup? (not *waiting-for-edit?*)))))))
+  (adapt! #'watch/wait-and-rescan!
+          (fn [f] (fn [q tracker paths ignore]
+                    (binding [*waiting-for-edit?* true]
+                      (let [[tracker event] (f q tracker paths ignore)]
+                        [(-> tracker
+                             (assoc ::auto-followup? false)
+                             (update-in [::trigger :files]
+                                        #(event-files (conj (vec %) event))))
+                         event]))))))
 
 (defn- install-summary-adapter! []
   ;; repl/run calls result/totals after throwing away the enclosing result map.
@@ -78,8 +125,14 @@
             (throw (ex-info "Receipt id completed while reserving it" {:path (str path)})))
         state {:run-id id :started started :nano (System/nanoTime)
                :tmp tmp :path path :committed? (atom false)
+               :trigger (or (get-in config [:kaocha.watch/tracker ::trigger])
+                            {:files [] :at started})
+               :auto-followup? (true? (get-in config [:kaocha.watch/tracker ::auto-followup?]))
+               :followup-of (get-in config [:kaocha.watch/tracker ::last-path])
                :config-hash (::config-hash config) :git-sha (git-sha)}]
-    (spit tmp (edn-str (select-keys (assoc state :status :running) [:run-id :started :status])))
+    (spit tmp (edn-str (assoc (select-keys state [:run-id :started :trigger :auto-followup? :followup-of])
+                             :status :running :jvm-pid (.pid (ProcessHandle/current))
+                             :process-start (str (.get (.startInstant (.info (ProcessHandle/current))))))))
     state))
 
 (defn- totals [r]
@@ -106,35 +159,69 @@
                     (zero? tests) :skipped :else :pass)
      :stdout (get t :kaocha.plugin.capture-output/output "")}))
 
+;; INTENT: STATUS-POINTER-001
+(defn- publish-latest! [path receipt]
+  (let [dir (.getParentFile ^java.io.File path)
+        tmp (io/file dir (str "LATEST." (:run-id receipt) ".tmp"))]
+    (spit tmp (str (edn-str {:path (str path) :run-id (:run-id receipt)
+                           :finished (:finished receipt)}) "\n"))
+    (Files/move (.toPath tmp) (.toPath (io/file dir "LATEST"))
+                (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE
+                                                StandardCopyOption/REPLACE_EXISTING]))))
+
 (defn- finish! [r]
-  (let [{:keys [run-id started nano tmp path committed? config-hash git-sha]} (::state r)
+  (let [{:keys [run-id started nano tmp path committed? config-hash git-sha
+                trigger auto-followup? followup-of]} (::state r)
         nodes (testable/test-seq-with-skipped r)
         receipt (cond-> {:run-id run-id :started started :finished (str (Instant/now))
                          :wall-ms (/ (- (System/nanoTime) nano) 1e6)
+                         :trigger trigger :auto-followup? auto-followup?
                          :totals (totals r)
                          :failures (mapv failure (filter hierarchy/fail-type?
                                                         (mapcat :kaocha.testable/events nodes)))
                          :config-hash config-hash :jvm-pid (.pid (ProcessHandle/current))
                          :kaocha-version (kaocha-version) :plugin-version plugin-version}
                   git-sha (assoc :git-sha git-sha)
+                  (and auto-followup? followup-of) (assoc :followup-of followup-of)
                   (:kaocha.plugin.affected/selection r)
                   (assoc :affected (:kaocha.plugin.affected/selection r))
                   (::include-tests? r)
                   (assoc :tests (mapv test-outcome (filter #(= :kaocha.type/var (:kaocha.testable/type %)) nodes))))]
-    (Files/write (.toPath tmp) (.getBytes (str (edn-str receipt) "\n") "UTF-8") (make-array OpenOption 0))
-    (Files/move (.toPath tmp) (.toPath path) (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE]))
+    ;; Keep the running reservation (and its PID) through BOTH publications.
+    ;; Killing between receipt rename and LATEST rename must not expose old green.
+    (let [ready (io/file (str path ".ready"))]
+      (Files/write (.toPath ready) (.getBytes (str (edn-str receipt) "\n") "UTF-8") (make-array OpenOption 0))
+      (Files/move (.toPath ready) (.toPath path) (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE])))
+    (publish-latest! path receipt)
+    (Files/delete (.toPath tmp))
     (reset! committed? true)
-    (-> r (assoc ::path (str path))
+    (-> (cond-> r (:kaocha.watch/tracker r)
+          (update :kaocha.watch/tracker
+                  #(-> % (dissoc ::pending-state)
+                       (assoc ::last-path (str path)
+                              ::settings (select-keys r [::dir ::config-hash])))))
+        (assoc ::path (str path))
         (update :kaocha.result/tests #(mapv (fn [t] (assoc t ::path (str path))) %)))))
 
 (defplugin kaocha.plugin/run-receipt
   (config [config]
     (install-summary-adapter!)
-    (assoc config ::config-hash
-           (config-hash (dissoc config ::config-hash :kaocha.watch/tracker
-                                :kaocha.plugin.affected/decision :kaocha.plugin.affected/snapshot))))
+    (install-watch-adapter!)
+    (let [config (assoc config ::config-hash
+                        (config-hash (dissoc config ::config-hash ::state :kaocha.watch/tracker
+                                             :kaocha.plugin.affected/decision :kaocha.plugin.affected/snapshot)))]
+      ;; Reuse the reservation made when watch accepted the event, before rescan.
+      ;; Initial watch runs reserve here, before reload. CLI config has no tracker.
+      (if-let [tracker (:kaocha.watch/tracker config)]
+        (assoc config ::state
+               (if-let [pending (::pending-state tracker)]
+                 (assoc pending :trigger (::trigger tracker)
+                                :auto-followup? (true? (::auto-followup? tracker))
+                                :config-hash (::config-hash config))
+                 (begin! config)))
+        config)))
   (pre-load [config]
-    (let [state (begin! config)
+    (let [state (or (::state config) (begin! config))
           reporter (:kaocha/reporter config)]
       (assoc config ::state state
              :kaocha/reporter

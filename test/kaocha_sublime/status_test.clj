@@ -1,11 +1,12 @@
 (ns kaocha-sublime.status-test
-  (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]
+  (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]]
+            [kaocha-sublime.reap :as reap]
             [kaocha-sublime.receipt-test :refer [temp-dir]])
-  (:import (java.nio.file Files)
+  (:import (java.lang ProcessHandle)
+           (java.nio.file Files)
            (java.nio.file.attribute FileTime)
            (java.time Instant)))
 
@@ -94,3 +95,28 @@
     (publish! dir (assoc base-receipt :run-id "recovered" :started "2026-09-08T12:00:00Z"
                         :finished "2026-09-08T12:00:01Z"))
     (is (str/includes? (status dir) "DONE id=recovered "))))
+
+(deftest reaper-preserves-live-and-unknown-owners
+  (let [dir (temp-dir) process (ProcessHandle/current)
+        r {:run-id "live" :started "2026-09-08T11:00:00Z" :status :running
+           :jvm-pid (.pid process) :process-start (str (.get (.startInstant (.info process))))}]
+    (put! dir "live.edn.tmp" r)
+    (is (= 0 (reap/reap! dir)))
+    (is (str/includes? (status dir) "RUNNING "))
+    ;; A different process start means this PID was recycled. Reaping that old
+    ;; reservation must not signal the current process (this test's JVM).
+    (put! dir "live.edn.tmp" (assoc r :process-start "2000-01-01T00:00:00Z"))
+    (is (= 1 (reap/reap! dir)))
+    (is (.isAlive process))
+    (put! dir "unknown.edn.tmp" (dissoc r :jvm-pid :process-start))
+    (is (= 0 (reap/reap! dir)))
+    (is (str/includes? (status dir) "RUNNING "))))
+
+(deftest unusual-paths-still-produce-one-physical-line
+  (let [dir (temp-dir) save (io/file dir "space % line\nfile.clj")]
+    (publish! dir base-receipt)
+    (spit save "; edited")
+    (Files/setLastModifiedTime (.toPath save) (FileTime/from (Instant/parse "2026-09-08T11:00:00Z")))
+    (is (= (str "KAOCHA-STATUS STALE latest=2026-09-08T10:00:10Z newer_edit="
+                dir "/space%20%25%20line%0Afile.clj@2026-09-08T11:00:00Z")
+           (status dir "--since" (str save))))))
