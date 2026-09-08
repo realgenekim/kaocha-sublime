@@ -113,4 +113,22 @@
    :misreadings ["The last green DONE overrides a red primary." "A missing parent means zero failures."]
    :boundaries ["Red parent" "Green parent" "Error parent" "Missing parent receipt" "Immutable replay" "Primary token"]
    :tests [:followup-done-carries-parent-outcome :followup-parent-summary-grammar :parent-summary-never-replaces-primary-token-selection]
-   :rationale "Blind-reader witness case 4, clj-surgeon-records 2035d62a, docs/observations/2026-09-08-blind-reader-witness.md: derivable is not unavoidable."}]}
+   :rationale "Blind-reader witness case 4, clj-surgeon-records 2035d62a, docs/observations/2026-09-08-blind-reader-witness.md: derivable is not unavoidable."}
+  {:id :AGENT-REQUESTED-SCOPE-020 :status :active
+   :ears "A supported probe shall report completeness of its explicit requested targets, name that scope, and count focus omissions separately from other skips; a full-scope token shall never accept a probe."
+   :misreadings ["Complete probe means full gate." "A Var probe covers every test in its namespace."]
+   :boundaries ["Namespace and Var targets" "Missing Var" "Declared exclusions" "1/1 closure"]
+   :tests [:probe-scope-separates-focus-from-declared-skips :full-follow-refuses-probe-even-with-equal-denominators :a-missing-var-among-valid-probe-targets-is-incomplete]
+   :rationale "Fable requested-scope ruling, item 4b defects, records 50db3993."}
+  {:id :AGENT-LOAD-REASON-021 :status :active
+   :ears "A probe reload failure shall retain FAIL kind=load and close with STATUS refused/load-error, reserving protocol-error for record failures."
+   :misreadings ["A caller typo is an unreadable stream."]
+   :boundaries ["Missing namespace" "Next probe in the same image"]
+   :tests [:mistyped-probe-is-typed-and-the-next-probe-runs]
+   :rationale "Item 4b mistyped namespace witness, records 50db3993."}
+  {:id :AGENT-CLOSURE-BASIS-022 :status :active
+   :ears "New receipts and DONE records shall name discovered-namespaces-v1 as their closure basis: selected namespace groups over all namespace groups in the discovery tree, independent of focus."
+   :misreadings ["Total is the number of requested targets." "Namespace groups count test Vars."]
+   :boundaries ["Namespace versus Var focus" "Suites omitted before discovery" "Legacy records without a basis"]
+   :tests [:probe-scope-separates-focus-from-declared-skips]
+   :rationale "Item 4b denominator drift, records 50db3993; convention changes require a new basis."}]}

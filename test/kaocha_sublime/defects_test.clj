@@ -200,6 +200,7 @@
       (finally (emergency-cleanup!)))))
 
 ;; INTENT-TEST: AGENT-PROBE-RELOAD-017
+;; INTENT-TEST: AGENT-LOAD-REASON-021
 (deftest mistyped-probe-is-typed-and-the-next-probe-runs
   (let [cfg (skip-fixture (temp-dir))
         bad (probe-run '[mistyped.missing-test] cfg)
@@ -208,6 +209,7 @@
     (is (= ["RUN-START" "FAIL" "STATUS"] (mapv first events)))
     (is (= "load" (get-in events [1 1 :kind])))
     (is (= "refused" (get-in events [2 1 :state])))
+    (is (= "load-error" (get-in events [2 1 :reason])))
     (is (not (.isLocked image/run-lock)))
     (let [good @(future (probe-run '[declared-gate-test] cfg))]
       (is (= 0 (:exit good)))
@@ -277,3 +279,48 @@
       (is (= done (-> (protocol/done-record receipt path (candidate/file-hash path))
                       protocol/json
                       (json/read-str :key-fn keyword)))))))
+
+;; INTENT-TEST: AGENT-REQUESTED-SCOPE-020
+;; INTENT-TEST: AGENT-CLOSURE-BASIS-022
+(deftest probe-scope-separates-focus-from-declared-skips
+  (let [dir (temp-dir) cfg (skip-fixture dir)
+        root (str dir "/test")]
+    (spit (str root "/other_scope_test.clj")
+          "(ns other-scope-test (:require [clojure.test :refer [deftest is]]))\n(deftest outside (is true))\n")
+    (doseq [[targets tests focused] [['[declared-gate-test] 2 1]
+                                     ['[declared-gate-test/green] 1 2]]]
+      (let [answer (probe-run targets cfg) r (candidate/read-edn (:path answer))
+            done (second (last (records (:events answer))))]
+        (is (= 0 (:exit answer)))
+        (is (= {:kind :probe :requested (mapv str targets)} (:scope r)))
+        (is (= {:kind "probe" :requested (mapv str targets)} (:scope done)))
+        (is (= :complete (:coverage r)))
+        (is (= tests (:tests done)))
+        (is (= 1 (:skipped done)) "Declared metadata skip is never focus")
+        (is (= focused (:skipped_by_focus done)))
+        (is (= focused (get-in r [:totals :skipped-by-focus])))
+        (is (= {:selected 1 :total 2} (:closure r)))
+        (is (= :discovered-namespaces-v1 (:closure-basis r)))
+        (is (= "discovered-namespaces-v1" (:closure_basis done)))
+        (is (= (if (= tests 1) ["declared-gate-test"] []) (:partial-namespaces r))
+            "Var probes must not satisfy namespace FOLLOW")
+        ))))
+
+;; INTENT-TEST: AGENT-REQUESTED-SCOPE-020
+(deftest full-follow-refuses-probe-even-with-equal-denominators
+  (let [{:keys [dir record] :as opts} (kaocha-sublime.agent-test/token-fixture)]
+    (kaocha-sublime.agent-test/publish-token!
+      dir (assoc record :mode :probe :scope {:kind :probe :requested ["a-test"]}
+                        :closure-basis :discovered-namespaces-v1))
+    (let [answer (status/observe opts)]
+      (is (= 2 (:exit answer)))
+      (is (= :uncovered (get-in answer [:record :state])))
+      (is (= :scope-missing (get-in answer [:record :reason]))))))
+
+;; INTENT-TEST: AGENT-REQUESTED-SCOPE-020
+(deftest a-missing-var-among-valid-probe-targets-is-incomplete
+  (let [cfg (skip-fixture (temp-dir))
+        answer (probe-run '[declared-gate-test/green declared-gate-test/absent] cfg)
+        r (candidate/read-edn (:path answer))]
+    (is (= 2 (:exit answer)))
+    (is (= :partial (:coverage r)))))
