@@ -303,29 +303,54 @@
                 (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE
                                                 StandardCopyOption/REPLACE_EXISTING]))))
 
-(defn- namespace-results [r]
-  (filter #(= :kaocha.type/ns (:kaocha.testable/type %)) (testable/test-seq-with-skipped r)))
+(defn- children [node]
+  (or (:kaocha.result/tests node) (:kaocha.test-plan/tests node) (:kaocha/tests node)))
+
+;; Kaocha 1.91's test-seq-with-skipped recurses through test-seq, which drops
+;; nested skips. Preserve the complete tree and inherited declared exclusions.
+;; INTENT: AGENT-DECLARED-GATE-015
+(defn- coverage-tree
+  ([node] (coverage-tree node [] false []))
+  ([node rules skipped? matched]
+   (let [rules (vec (distinct (concat rules (:kaocha.filter/skip-meta node))))
+         skipped? (or skipped? (:kaocha.testable/skip node))
+         matched (vec (distinct (concat matched (filter #(get (:kaocha.testable/meta node) (keyword %)) rules))))]
+     (assoc node ::skipped? (boolean skipped?)
+                 ::declared-skip (when skipped? matched)
+                 ::children (mapv #(coverage-tree % rules skipped? matched) (children node))))))
+
+(defn- coverage-nodes [tree] (tree-seq #(seq (::children %)) ::children tree))
 
 (defn- coverage-data [r]
-  (let [namespaces (namespace-results r)
-        selected (filter #(and (= :kaocha.type/ns (:kaocha.testable/type %))
-                                (or (contains? % :kaocha.result/tests)
-                                    (empty? (:kaocha.test-plan/tests %)))) (testable/test-seq r))
+  (let [nodes (coverage-nodes (coverage-tree r))
+        namespaces (filter #(= :kaocha.type/ns (:kaocha.testable/type %)) nodes)
+        leaves-of #(filter hierarchy/leaf? (coverage-nodes %))
+        declared? #(seq (::declared-skip %))
+        selected (filter #(or (declared? %)
+                              (and (not (::skipped? %))
+                                   (or (contains? % :kaocha.result/tests)
+                                       (every? declared? (leaves-of %))))) namespaces)
         complete? (fn [n]
-                    (let [leaves (filter hierarchy/leaf? (testable/test-seq-with-skipped n))]
+                    (let [leaves (leaves-of n)]
                       (and (not (:kaocha.testable/load-error n))
-                           (every? #(and (not (:kaocha.testable/skip %))
-                                         (pos? (:kaocha.result/count % 0))
-                                         (zero? (:kaocha.result/pending % 0))) leaves))))
+                           (every? #(and (not (:kaocha.testable/load-error %))
+                                         (or (declared? %)
+                                             (and (not (::skipped? %))
+                                                  (pos? (:kaocha.result/count % 0))
+                                                  (zero? (:kaocha.result/pending % 0))))) leaves))))
         full (filter complete? selected)
-        leaves (filter hierarchy/leaf? (testable/test-seq-with-skipped r))
-        executed (filter #(and (pos? (:kaocha.result/count % 0))
+        leaves (filter hierarchy/leaf? nodes)
+        executed (filter #(and (not (::skipped? %)) (pos? (:kaocha.result/count % 0))
                                (zero? (:kaocha.result/pending % 0))) leaves)
-        pending (filter #(pos? (:kaocha.result/pending % 0)) leaves)]
+        pending (filter #(and (not (::skipped? %)) (pos? (:kaocha.result/pending % 0))) leaves)]
     {:closure (when (seq namespaces) {:selected (count selected) :total (count namespaces)})
      :executed-namespaces (mapv (comp str :kaocha.ns/name) selected)
      :partial-namespaces (mapv (comp str :kaocha.ns/name) (remove #(contains? (set (map :kaocha.testable/id full)) (:kaocha.testable/id %)) selected))
      :coverage (cond (empty? selected) :unknown (= (count full) (count selected)) :complete :else :partial)
+     :skip-rules (mapv (fn [n] {:id (:kaocha.testable/id n) :skip-meta (vec (:kaocha.filter/skip-meta n))})
+                       (filter #(seq (:kaocha.filter/skip-meta %)) nodes))
+     :declared-skips (mapv (fn [n] {:id (:kaocha.testable/id n) :skip-meta (::declared-skip n)})
+                           (filter declared? leaves))
      :executed-tests (count executed)
      :skipped-tests (- (count leaves) (count executed) (count pending))}))
 

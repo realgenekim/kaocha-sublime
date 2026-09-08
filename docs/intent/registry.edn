@@ -83,4 +83,10 @@
    :misreadings ["Only post-run needs cleanup." "A PID alone identifies an owner."]
    :boundaries ["Empty selection" "Load exception" "Interrupt" "Reservation failure" "PID reuse"]
    :tests [:failed-load-releases-lease :dead-owner-reservation-is-reclaimed]
-   :rationale "Item 4 adapter defects, records b3b02d33, 2026-09-08."}]}
+   :rationale "Item 4 adapter defects, records b3b02d33, 2026-09-08."}
+  {:id :AGENT-DECLARED-GATE-015 :status :active
+   :ears "Declared skip-meta exclusions shall be counted and recorded without reducing coverage of the declared gate; focus, pending and unexecuted required tests still prevent completion."
+   :misreadings ["Every skip is missing coverage." "Every skip is declared by the gate."]
+   :boundaries ["Nested skips" "Namespace metadata" "Focused Var" "Fail-fast" "All skipped"]
+   :tests [:declared-skips-complete-the-gate :focus-still-leaves-missing-coverage]
+   :rationale "Fable's declared-gate ruling, item 4 ccfp witness, records b3b02d33."}]}

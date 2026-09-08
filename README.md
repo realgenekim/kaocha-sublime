@@ -97,7 +97,9 @@ content hashes, deleted requested paths, and required scope. Identical candidate
 and scopes coalesce. MARK launches no JVM. By default the required scope is the
 full configured suite; add `--ns my-app.core-test,another-test` **to MARK** to bind
 an explicit namespace scope. Namespace scopes require all tests in each requested
-namespace, including tests a focused retry skipped.
+namespace under the declared gate, including tests a focused retry skipped.
+Declared `:skip-meta` exclusions count as covered and are recorded with their
+matching rules in the receipt; they never add to passing assertion counts.
 
 FOLLOW blocks in one Babashka process and prints exactly one matching `RUN-DONE`
 or one `STATUS`. It exits **0** for an exact candidate with required coverage and

@@ -80,8 +80,16 @@ with the same content and scope, including marks made after completion.
 `coverage=complete` describes the selected namespace closure. A full-scope token
 additionally requires `closure.selected == closure.total`. Empty discovered
 namespace groups contribute to namespace closure but invent no executed tests.
-Pending tests do not execute, do not add assertions, and prevent a pass. Skipped
-leaves are counted separately. A namespace scope requires every test in those
+Pending tests do not execute, do not add assertions, and prevent a pass. The
+declared gate defines complete coverage: leaves excluded by the effective
+`:kaocha.filter/skip-meta` configuration do not reduce it. Receipts record
+`:skip-rules` (declaring node ID and metadata keys), `:declared-skips` (excluded
+leaf IDs and matching keys), and the separate `:totals :skipped` count. DONE's
+`skipped` includes all unexecuted non-pending leaves, including nested skips;
+only declared exclusions are exempt from coverage. Focused omissions, fail-fast
+omissions, load errors, and pending tests remain incomplete. Zero executed tests
+cannot pass even if every test was deliberately skipped.
+A namespace scope requires every non-excluded test in those
 namespaces; a Var-focused green cannot satisfy it. Exit 1 establishes an exact
 candidate's failure/error; it does not establish complete coverage.
 

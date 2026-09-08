@@ -9,6 +9,8 @@
             [kaocha-sublime.agent-test :refer [records]]
             [kaocha-sublime.candidate :as candidate]
             [kaocha-sublime.image :as image]
+            [kaocha-sublime.protocol :as protocol]
+            [kaocha-sublime.status :as status]
             [kaocha-sublime.receipt-test :refer [temp-dir fixture-config]]))
 
 (defn config [dir]
@@ -79,3 +81,39 @@
                       (mapcat records (filter #(.endsWith (.getName %) ".events") (file-seq (io/file dir))))))
         (is (map? @(future (run! cfg))) "A different nREPL thread can acquire the next lease")
         (finally (emergency-cleanup!))))))
+
+(defn skip-fixture [dir]
+  (let [root (str dir "/test") file (str root "/declared_gate_test.clj")]
+    (io/make-parents file)
+    (spit file "(ns declared-gate-test (:require [clojure.test :refer [deftest is]]))\n(deftest green (is true))\n(deftest another-green (is true))\n(deftest ^:ci configured-skip (throw (Exception. \"must be skipped\")))\n")
+    (-> (config (str dir "/runs"))
+        (assoc :kaocha/tests [{:kaocha.testable/id :unit :kaocha.testable/type :kaocha.type/clojure.test
+                              :kaocha/source-paths [] :kaocha/test-paths [root]
+                              :kaocha/ns-patterns [".*"] :kaocha.filter/skip-meta [:e2e :slow :pg :ci]}]))))
+
+;; INTENT-TEST: AGENT-DECLARED-GATE-015
+(deftest declared-skips-complete-the-gate
+  (let [dir (temp-dir) cfg (skip-fixture dir)
+        result (run! cfg) path (:kaocha.plugin.run-receipt/path result)
+        r (candidate/read-edn path) done (second (last (records (:events r))))]
+    (is (= :complete (:coverage r)))
+    (is (= {:selected 1 :total 1} (:closure r)))
+    (is (= 2 (get-in r [:totals :tests])))
+    (is (= 1 (get-in r [:totals :skipped])))
+    (is (= "pass" (:outcome done)))
+    (is (= [{:id :declared-gate-test/configured-skip :skip-meta [:ci]}] (:declared-skips r)))
+    (is (= [{:id :unit :skip-meta [:e2e :slow :pg :ci]}] (:skip-rules r)))
+    ;; Identity is separately proved by a cold/watch run; isolate coverage here.
+    (let [token (candidate/mark! (str dir "/runs") [] {:kind :full})
+          r (assoc r :identity :exact)]
+      (kaocha-sublime.agent-test/publish-token! (str dir "/runs") r)
+      (is (= 0 (:exit (status/observe {:dir (str dir "/runs") :token token})))))))
+
+;; INTENT-TEST: AGENT-DECLARED-GATE-015
+(deftest focus-still-leaves-missing-coverage
+  (let [cfg (skip-fixture (temp-dir))
+        result (run! (assoc cfg :kaocha.filter/focus [:declared-gate-test/green]))
+        r (candidate/read-edn (:kaocha.plugin.run-receipt/path result))]
+    (is (= :partial (:coverage r)))
+    (is (= :incomplete (protocol/outcome (:totals r) (:coverage r))))
+    (is (= 2 (get-in r [:totals :skipped])))))
