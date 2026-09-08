@@ -97,11 +97,15 @@
   ;; clojure.test records (not (= evaluated-expected evaluated-actual)). No
   ;; assertion form is evaluated here, and no arbitrary seq is traversed.
   (let [a (:actual e)]
-    (when (and (instance? clojure.lang.PersistentList a) (= 'not (first a)))
-      (let [eq (second a)]
-        (when (and (instance? clojure.lang.PersistentList eq)
-                   (contains? #{'= 'clojure.core/=} (first eq)) (= 3 (count eq)))
-          [(second eq) (nth eq 2)])))))
+    (when (and (= clojure.lang.PersistentList (class a)) (= 2 (count a)) (= 'not (first a)))
+      (let [eq (second a)
+            concrete? (contains? #{clojure.lang.PersistentList clojure.lang.Cons} (class eq))
+            ;; Cons.more returns its stored tail without seq/next realization.
+            ;; clojure.test's evaluated values are a concrete PersistentList.
+            values (when concrete? (.more ^clojure.lang.ISeq eq))]
+        (when (and concrete? (contains? #{'= 'clojure.core/=} (first eq))
+                   (= clojure.lang.PersistentList (class values)) (= 2 (count values)))
+          [(first values) (second values)])))))
 
 (defn- exception-evidence [x]
   (when (instance? Throwable x)

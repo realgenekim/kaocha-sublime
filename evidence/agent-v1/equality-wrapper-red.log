@@ -1,0 +1,38 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+
+Testing kaocha-sublime.plugins-test
+
+Testing kaocha-sublime.receipt-test
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+
+Testing kaocha-sublime.affected-test
+
+Testing kaocha-sublime.status-test
+
+Testing kaocha-sublime.intent-contract-test
+
+Testing kaocha-sublime.agent-test
+
+FAIL in (real-equality-event-exposes-safe-values-and-diff) (agent_test.clj:272)
+expected: (= "{:invoice {:total 42}}" (:expected r))
+  actual: (not (= "{:invoice {:total 42}}" "(= {:invoice {:total 42}} {:invoice {:total 43}})"))
+
+FAIL in (real-equality-event-exposes-safe-values-and-diff) (agent_test.clj:273)
+expected: (= "{:invoice {:total 43}}" (:actual r))
+  actual: (not (= "{:invoice {:total 43}}" "(not <opaque:clojure.lang.Cons>)"))
+
+FAIL in (real-equality-event-exposes-safe-values-and-diff) (agent_test.clj:274)
+expected: (str/includes? (or (:diff r) "") ":invoice :total")
+  actual: (not (str/includes? "" ":invoice :total"))
+
+FAIL in (real-equality-event-exposes-safe-values-and-diff) (agent_test.clj:275)
+expected: (not-any? #{:expected :actual :diff} (:unavailable r))
+  actual: (not (not-any? #{:expected :actual :diff} [:context :actual :diff]))
+
+Ran 49 tests containing 351 assertions.
+4 failures, 0 errors.

@@ -263,6 +263,22 @@
     (is (str/includes? (or (:diff r) "") "43"))
     (is (<= (count (protocol/json (:diff r))) 512))))
 
+;; INTENT-TEST: AGENT-ENCODER-009
+(deftest real-equality-event-exposes-safe-values-and-diff
+  (let [events (atom [])]
+    (with-redefs [clojure.test/do-report #(swap! events conj %)]
+      (is (= {:invoice {:total 42}} {:invoice {:total 43}})))
+    (let [r (agent/failure-record {:run-id "equality" :mode :probe} (first @events) 1)]
+      (is (= "{:invoice {:total 42}}" (:expected r)))
+      (is (= "{:invoice {:total 43}}" (:actual r)))
+      (is (str/includes? (or (:diff r) "") ":invoice :total"))
+      (is (not-any? #{:expected :actual :diff} (:unavailable r)))))
+  (let [forced (atom 0) tail (map #(do (swap! forced inc) %) (range))
+        r (agent/failure-record {:run-id "unsafe-equality" :mode :probe}
+                               {:actual (list 'not (cons '= tail))} 1)]
+    (is (zero? @forced))
+    (is (nil? (:diff r)))))
+
 (deftest malformed-records-refuse-instead-of-looking-green
   (doseq [r [(protocol/status :invented :none)
              (protocol/status :waiting :invented)
