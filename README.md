@@ -130,6 +130,26 @@ and launcher output remain the launcher's separate diagnostic stream.
 
 Cold `kaocha.runner` uses `mode=gate`; warm `kaocha.repl/run` uses `mode=probe`;
 watch uses `mode=watch`. A fresh uninstrumented warm image is **identity unknown**.
+
+Warm adapters should use the supported reload-and-run entrance:
+
+```clojure
+(require '[kaocha-sublime.probe :as probe])
+(probe/run '[my-app.core my-app.core-test] {:suite :unit})
+```
+
+Relay only the returned `:events` file and use `:exit` for the run's outcome.
+`:path` is the completed receipt, or nil on an aborted load; the returned `:error`
+belongs in diagnostics. Reservation and START precede reload, so mistyped
+namespaces produce typed load evidence and leave the next probe usable.
+This entrance unloads namespaces using the watcher's tools.namespace machinery
+before requiring them; deleted Vars therefore disappear. Supply source
+namespaces before their test/dependent namespaces. It does not discover or
+reload unnamed dependents, repair retained object/Var references elsewhere, or
+attest a whole warm image. Reload-disabled namespaces refuse. Probe identity
+remains unknown; token acceptance still requires the independent image proof.
+Plain `require :reload` and the legacy adapter retain Clojure's stale-Var behavior.
+
 Hash equality alone never attests its already-loaded Vars. Watch binds candidate
 hashes to the actual namespace reload and observed generation. Inode change times
 also reject transient save-and-restore during load/run. Config/classpath changes

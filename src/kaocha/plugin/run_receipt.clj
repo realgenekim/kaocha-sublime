@@ -59,6 +59,7 @@
 (declare begin!)
 
 (def ^:dynamic *run-state* nil)
+(def ^:dynamic *run-observer* nil)
 
 ;; INTENT: AGENT-LEASE-014
 (defn- release! [state]
@@ -84,7 +85,9 @@
 (defn- guarded-run [f config]
   (binding [*run-state* (atom (get-in config [:kaocha.watch/tracker ::pending-state]))]
     (try (f config)
-         (finally (cleanup! @*run-state*)))))
+         (finally
+           (try (cleanup! @*run-state*)
+                (finally (when *run-observer* (reset! *run-observer* @*run-state*))))))))
 
 (defn- adapt! [v wrap]
   (alter-var-root v #(if (::watch-adapter (meta %)) %
@@ -196,6 +199,7 @@
         (when-not (:admitted? caps)
           (let [state (agent/new-stream! {:dir dir :run-id (new-run-id "refused")
                                            :mode (image/mode config) :session image/session-id})]
+            (when *run-observer* (reset! *run-observer* state))
             (candidate/publish-session! dir {:workspace (candidate/canonical ".")
                                               :session image/session-id
                                               :generation (candidate/data-hash [::config-hash :heap-cap])
@@ -451,6 +455,13 @@
   (pre-load [config]
     (let [state (or (::state config) (begin! config))
           reporter (:kaocha/reporter config)]
+      (when-let [namespaces (::probe-namespaces config)]
+        (try (image/reload-probe! namespaces)
+             (catch Throwable t
+               (when (:events state)
+                 (agent/failure! state {:type :error :actual t
+                                        :kaocha/testable {:kaocha.testable/load-error t}}))
+               (throw t))))
       (assoc config ::state state
              :kaocha/reporter
              (fn [event]

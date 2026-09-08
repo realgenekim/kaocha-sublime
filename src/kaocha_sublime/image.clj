@@ -4,6 +4,7 @@
             [clojure.string :as str]
             [kaocha-sublime.candidate :as candidate]
             [lambdaisland.tools.namespace.file :as file]
+            [lambdaisland.tools.namespace.reload :as reload]
             [lambdaisland.tools.namespace.repl :as repl])
   (:import (java.util UUID)))
 
@@ -21,6 +22,24 @@
   (swap! observed inc)
   (swap! images #(into {} (map (fn [[dir state]] [dir (assoc state :trusted? false)])) %))
   nil)
+
+;; INTENT: AGENT-PROBE-RELOAD-017
+(defn reload-probe!
+  "Unload and reload explicit namespaces using the watcher's reload machinery.
+  Callers supply dependencies before their dependents; this is not graph repair
+  or loaded-image attestation. Runs inside the probe's reserved load phase."
+  [namespaces]
+  (invalidate!)
+  (let [namespaces (vec (distinct namespaces))
+        tracker {:lambdaisland.tools.namespace.track/unload (reverse namespaces)
+                 :lambdaisland.tools.namespace.track/load namespaces}
+        enabled (repl/remove-disabled tracker)]
+    (when-not (= tracker enabled)
+      (throw (ex-info "Probe cannot reload a namespace with reload disabled" {:reason :identity-unproved})))
+    (let [result (reload/track-reload tracker)]
+      (when-let [error (:lambdaisland.tools.namespace.reload/error result)]
+        (throw (ex-info "Probe namespace reload failed"
+                        {:namespace (:lambdaisland.tools.namespace.reload/error-ns result)} error))))))
 
 (defn mode [config]
   (let [stack (map #(.getClassName ^StackTraceElement %) (.getStackTrace (Thread/currentThread)))]

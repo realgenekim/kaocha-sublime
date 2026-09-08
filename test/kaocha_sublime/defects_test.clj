@@ -5,6 +5,7 @@
             [clojure.java.shell :as shell]
             [clojure.test :refer [deftest is]]
             [kaocha.api :as api]
+            [kaocha.classpath :as classpath]
             [kaocha.testable :as testable]
             [kaocha.plugin.run-receipt :as receipt]
             [kaocha-sublime.agent-test :refer [records]]
@@ -137,3 +138,54 @@
         (is (= id (get-in events [0 1 :id])))
         (is (= "heap-cap" (get-in events [0 1 :reason])))))
     (is (not (.exists (io/file dir "LATEST"))))))
+
+(defn probe-run [targets cfg]
+  (if-let [f (try (requiring-resolve 'kaocha-sublime.probe/run) (catch java.io.FileNotFoundException _ nil))]
+    (let [answer (atom nil)]
+      (with-out-str
+        (binding [clojure.test/*test-out* *out* clojure.test/*report-counters* nil]
+          (reset! answer (f targets cfg))))
+      @answer)
+    ;; Execute item 4's old adapter path for the red half of the regression.
+    (do (doseq [n targets] (require n :reload))
+        (let [r (run! (assoc cfg :kaocha.filter/focus (mapv keyword targets)))]
+          {:path (:kaocha.plugin.run-receipt/path r)}))))
+
+;; INTENT-TEST: AGENT-PROBE-RELOAD-017
+(deftest deleted-test-vars-do-not-survive-probes
+  (let [dir (temp-dir) root (str dir "/test") file (str root "/probe_deleted_test.clj")
+        cfg (assoc (config (str dir "/runs")) :kaocha/tests
+                   [{:kaocha.testable/id :unit :kaocha.testable/type :kaocha.type/clojure.test
+                     :kaocha/source-paths [] :kaocha/test-paths [root] :kaocha/ns-patterns ["-test$"]}])
+        header "(ns probe-deleted-test (:require [clojure.test :refer [deftest is]]))\n"]
+    (io/make-parents file)
+    (classpath/add-classpath root)
+    (try
+      (spit file (str header "(deftest stays (is true))\n(deftest deleted-red (is false))\n"))
+      (let [r (candidate/read-edn (:path (probe-run '[probe-deleted-test] cfg)))]
+        (is (= 1 (get-in r [:totals :fail]))))
+      (spit file (str header "(deftest stays (is true))\n"))
+      (let [r (candidate/read-edn (:path (probe-run '[probe-deleted-test] cfg)))]
+        (is (= 1 (get-in r [:totals :tests])))
+        (is (= 0 (get-in r [:totals :fail])))
+        (is (nil? (ns-resolve 'probe-deleted-test 'deleted-red))))
+      ;; Deleted green Vars also must not manufacture executed coverage.
+      (spit file header)
+      (probe-run '[probe-deleted-test] cfg)
+      (is (nil? (ns-resolve 'probe-deleted-test 'stays)))
+      (is (not (.isLocked image/run-lock)))
+      (finally (emergency-cleanup!)))))
+
+;; INTENT-TEST: AGENT-PROBE-RELOAD-017
+(deftest mistyped-probe-is-typed-and-the-next-probe-runs
+  (let [cfg (skip-fixture (temp-dir))
+        bad (probe-run '[mistyped.missing-test] cfg)
+        events (records (:events bad))]
+    (is (= 2 (:exit bad)))
+    (is (= ["RUN-START" "FAIL" "STATUS"] (mapv first events)))
+    (is (= "load" (get-in events [1 1 :kind])))
+    (is (= "refused" (get-in events [2 1 :state])))
+    (is (not (.isLocked image/run-lock)))
+    (let [good @(future (probe-run '[declared-gate-test] cfg))]
+      (is (= 0 (:exit good)))
+      (is (= "pass" (get-in (last (records (:events good))) [1 :outcome]))))))

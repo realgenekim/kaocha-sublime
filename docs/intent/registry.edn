@@ -95,4 +95,10 @@
    :misreadings ["Refusals may silently invent another ID." "Unsafe refusal IDs need no validation."]
    :boundaries ["Missing cap" "Policy ceiling" "Unsafe ID" "Existing stream"]
    :tests [:heap-refusal-honors-launcher-id]
-   :rationale "Item 4 launcher directory-diff workaround, records b3b02d33."}]}
+   :rationale "Item 4 launcher directory-diff workaround, records b3b02d33."}
+  {:id :AGENT-PROBE-RELOAD-017 :status :active
+   :ears "The supported warm probe shall unload named namespaces before reloading, so deleted test Vars cannot survive as stale red or green."
+   :misreadings ["require :reload removes definitions." "Reloading named namespaces attests all loaded dependencies."]
+   :boundaries ["Deleted red Var" "Deleted green Var" "Missing namespace" "Dependency order" "Reload disabled"]
+   :tests [:deleted-test-vars-do-not-survive-probes]
+   :rationale "Item 4 warm adapter stale-Var witness, records b3b02d33."}]}
