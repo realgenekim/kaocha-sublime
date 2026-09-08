@@ -34,7 +34,7 @@ def record(kind, **data):
 
 def status(*args):
     started = time.perf_counter_ns()
-    r = subprocess.run([STATUS, '--dir', str(RUNS), *args], cwd=ROOT,
+    r = subprocess.run([STATUS, '--legacy', '--dir', str(RUNS), *args], cwd=ROOT,
                        capture_output=True, text=True, check=True)
     elapsed = (time.perf_counter_ns() - started) / 1e6
     assert not r.stderr, r.stderr
@@ -89,7 +89,7 @@ needle = '(is (nil? (auth/verify-session-cookie "garbage")))'
 assert original.count(needle) == 1
 red = original.replace(needle, '(is (some? (auth/verify-session-cookie "garbage")))')
 cp = (FX / 'classpath.txt').read_text().strip()
-command = ['java', '-Dguardrails.enabled=true', '-Dmvr.data.dir=target/test-data',
+command = ['java', '-Xms64m', '-Xmx512m', '-Dguardrails.enabled=true', '-Dmvr.data.dir=target/test-data',
            '-cp', cp, 'clojure.main', '-m', 'kaocha.runner', '--watch',
            '--plugin', 'kaocha.plugin/affected', '--plugin', 'kaocha.plugin/run-receipt']
 log = (FX / 'watcher.log').open('w')

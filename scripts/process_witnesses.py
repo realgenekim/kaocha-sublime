@@ -4,7 +4,7 @@ import os, pathlib, re, shutil, signal, subprocess, time
 REPO = pathlib.Path(__file__).resolve().parents[1]
 FX = pathlib.Path('/var/tmp/forge/kaocha-sublime-fx/process')
 FX.mkdir(parents=True, exist_ok=True)
-cp = subprocess.check_output(['clojure', '-Spath'], cwd=REPO, text=True).strip()
+cp = subprocess.check_output(['clojure', '-J-Xms64m', '-J-Xmx512m', '-Spath'], cwd=REPO, text=True).strip()
 cp = ':'.join(str((REPO / p).resolve()) for p in cp.split(':')) + ':' + str(REPO / 'test')
 
 def launch(name, fixture='tiny', mode='api', extra_env=None, shared_out=None):
@@ -14,7 +14,7 @@ def launch(name, fixture='tiny', mode='api', extra_env=None, shared_out=None):
     out = shared_out or root / 'receipts'
     log = open(FX / (name + '.log'), 'w')
     env = dict(os.environ, **(extra_env or {}))
-    cmd = ['java', '-Xmx256m', '-cp', cp + ':' + str(root / 'src'),
+    cmd = ['java', '-Xms64m', '-Xmx512m', '-cp', cp + ':' + str(root / 'src'),
            'clojure.main', '-m', 'kaocha-sublime.driver', mode, str(root), str(out)]
     return subprocess.Popen(cmd, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT), root, log
 

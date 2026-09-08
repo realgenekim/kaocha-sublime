@@ -1,13 +1,16 @@
 # kaocha-sublime
 
-Two experimental plugins for **Kaocha 1.91.1392**, Clojure 1.12, Java 17+:
-atomic run receipts and conservative selection of affected test namespaces.
+Experimental plugins for **Kaocha 1.91.1392**, Clojure 1.12, Java 17+:
+atomic run receipts, conservative affected namespace selection, and an agent reporter
+with content-bound status. Exact agent image attestation currently requires Linux
+inode change-time support; unsupported filesystems remain identity unknown.
 
-Add the local checkout to your test alias:
+Add the local checkout and explicit heap options to your test alias:
 
 ```clojure
 :extra-deps {local/kaocha-sublime
              {:local/root "/home/forge/src/kaocha-sublime"}}
+:jvm-opts ["-Xms64m" "-Xmx512m"]
 ```
 
 Enable both in `tests.edn`, after your other plugins:
@@ -59,87 +62,78 @@ TEST-RECEIPT /absolute/worktree/target/kaocha-runs/<actual-run-id>.edn
 Use the returned `:kaocha.plugin.run-receipt/path` value to fill it. Do not infer
 a receipt from a timestamp or choose the newest file from another run.
 
-## watch mode for agents: never tail; ask kaocha-status
+## Agent view: save, mark, follow
 
-With Babashka on PATH, run this one-shot command from the project worktree
-(use the absolute path to this checkout's `bin/kaocha-status` if needed):
+Enable `:kaocha.plugin/run-receipt` after the other plugins, then select
+`:reporter [kaocha.report/agent]` in `tests.edn` or pass
+`--reporter kaocha.report/agent`. `KAOCHA_AGENT=1` also selects this view when the
+receipt plugin is enabled. Every launcher must supply `-Xms64m -Xmx512m`;
+agent mode checks JVM input arguments and effective maximum heap before loading
+any tests, refusing missing/oversized cap evidence with `STATUS refused/heap-cap`.
+The default policy ceiling is 536870912 bytes; configure it with
+`:kaocha.plugin.run-receipt/heap-ceiling-bytes`.
 
-```bash
-/home/forge/src/kaocha-sublime/bin/kaocha-status \
-  --dir target/kaocha-runs/ \
-  --since test/my_app/core_test.clj \
-  --ns my-app.core-test
-```
-
-The exact three-question rule is **in progress? mine? passed?**
-
-1. **In progress?** `RUNNING` means a run has been reserved, including watcher
-   rescan and namespace reload. Ask again for a verdict. Never tail the logs.
-2. **Mine?** Supply `--since <file>` for the save just made, or an ISO-8601 UTC
-   stamp, and `--ns <ns,...>` for the needed namespaces. `STALE` means the run
-   started before that save. `NONE` means there is no usable current verdict.
-   Require `DONE` with `covers=yes` when namespace coverage matters.
-3. **Passed?** On that `DONE` line, check `fail=0 error=0` and the expected test
-   count. `DONE` itself means completed, including failing runs. The receipt has
-   assertion, pending, and failure details if they are needed.
-
-Each call prints exactly one line:
-
-```text
-KAOCHA-STATUS RUNNING since=<stamp> tmp=<path>
-KAOCHA-STATUS DONE id=<id> finished=<stamp> tests=<n> pass=<n> fail=<n> error=<n> closure=<n>/<total> covers=<yes|no|unknown> receipt=<path>
-KAOCHA-STATUS STALE latest=<stamp> newer_edit=<path>@<mtime>
-KAOCHA-STATUS NONE dir=<dir>
-```
-
-`--dir` defaults to `target/kaocha-runs/`. `closure=n/total` is selected/configured
-test namespace counts; `covers` checks that **all** requested namespaces occur in
-the receipt's recorded dependency closure. It is `unknown` without a namespace
-request or closure metadata. Missing selection counts display `0/0`.
-For `--since <stamp>`, the stale field is `newer_edit=stamp@<stamp>`.
-Whitespace and percent signs in paths are percent-encoded to preserve one line.
-The command reads `LATEST`; it never chooses a receipt by filename or mtime.
-Old receipt directories without a pointer return
-`KAOCHA-STATUS NONE dir=<dir> reason=no-latest-pointer`. Invalid pointers and
-ambiguous concurrent runs also produce `NONE` with a reason. Normal status states
-exit zero; invalid arguments/data exit 2 with one `NONE ... reason=invalid-input` line.
-
-An automatic follow-up has its own receipt and updates `LATEST`. It also records
-`:followup-of <parent-receipt-path>`. With `--since`, an **unchanged** automatic
-follow-up resolves that explicit parent, preserving the save's run ID and verdict.
-Without `--since`, status shows the latest follow-up. A follow-up that drained new
-file events is a new save's run and is evaluated on its own start time. This is a
-freshness check against the latest event run, not a search for arbitrary past saves.
-Retain a returned receipt path when an exact historical run is needed.
-
-The two limits:
-
-- **`sed -i` blindness is upstream.** A rename-style edit may produce no event that
-  Kaocha consumes. `--since <file>` returns STALE; it cannot make the watcher rerun.
-  Use a watched in-place save or request a manual run with Enter.
-- **An agent that edits during a run gets STALE by design.** Freshness compares the
-  run's **start**, including rescan, against the save's precise file mtime. A later
-  finish stamp cannot prove the run included that edit. Wait for a new run.
-
-After a watcher dies, its `.tmp` still says RUNNING until explicit cleanup:
+From the project worktree, after saving:
 
 ```bash
-/home/forge/src/kaocha-sublime/bin/kaocha-reap --dir target/kaocha-runs/
+/home/forge/src/kaocha-sublime/bin/kaocha-status --mark test/my_app/core_test.clj
+/home/forge/src/kaocha-sublime/bin/kaocha-status --follow --token TOKEN_FROM_MARK --timeout 120
 ```
 
-The reaper never signals a process. It checks the recorded local PID and process
-start time, leaves live/unknown owners alone, and publishes `INTERRUPTED` before
-removing dead reservations. Status then says `NONE ... reason=interrupted` instead
-of resurfacing the old green. A later completed run supersedes that interruption.
-Use one local watcher per receipt directory; do not manually discard crash markers.
+MARK prints one `STATUS` JSON record containing an opaque `token`. Its manifest
+binds the canonical workspace, runner session, configuration/classpath generation,
+content hashes, deleted requested paths, and required scope. Identical candidates
+and scopes coalesce. MARK launches no JVM. By default the required scope is the
+full configured suite; add `--ns my-app.core-test,another-test` **to MARK** to bind
+an explicit namespace scope. Namespace scopes require all tests in each requested
+namespace, including tests a focused retry skipped.
 
-The status executable loads only dependency-free Clojure under Babashka; it starts
-no JVM or watcher. Ten fresh processes against the live mvr watcher measured
-**23.85 ms median, 25.57 ms maximum** (Babashka 1.13.219, this Linux seat).
-The [witnesses](evidence/status-watch/witnesses.jsonl) retain each line and timing.
-The watcher adapter is pinned to Kaocha 1.91.1392, observes its queue/rescan
-functions, and reserves RUNNING before rescan. It requires new validation before
-supporting a different upstream lifecycle.
+FOLLOW blocks in one Babashka process and prints exactly one matching `RUN-DONE`
+or one `STATUS`. It exits **0** for an exact candidate with required coverage and
+pass, **1** for verified red on an exact candidate, **2** for unknown, incomplete,
+uncovered, superseded, killed, refused, or timeout. Verified red does not claim
+that every required check finished. `--token TOKEN` without `--follow` makes one
+current observation. `--dir` defaults to `target/kaocha-runs/`; no heartbeat is
+emitted. Timeout ends the wait and never kills or replaces the JVM.
+
+An overwrite gives `superseded`; a requested path outside the runner's watched
+roots gives `uncovered`. A run that finished before MARK can match by content.
+An old LATEST green cannot satisfy a different candidate. PID **and start identity**
+identify a killed active run; status reports death without requiring cleanup.
+`bin/kaocha-reap --dir DIR` preserves that interrupted identity while retiring dead
+reservations. An unchanged automatic follow-up carries a parent ID and digest;
+status selects its matching primary. Runs are serialized per JVM and receipt directory.
+
+Runner events live in `<id>.events`, an owned destination separate from test
+stdout/stderr. A clean run emits `RUN-START` and `RUN-DONE`; FAIL records are bounded
+to 20 events and 16 KiB per run. DONE reports shown/omitted counts. START precedes
+load; DONE follows final receipt rename and LATEST publication. Status reconstructs
+that identical DONE from the authenticated receipt, so lost terminal output does
+not require another test run. Captured test output is bounded to 16 KiB per test
+and 64 KiB in the receipt's diagnostic artifact. Capture bypass, JVM diagnostics,
+and launcher output remain the launcher's separate diagnostic stream.
+
+Cold `kaocha.runner` uses `mode=gate`; warm `kaocha.repl/run` uses `mode=probe`;
+watch uses `mode=watch`. A fresh uninstrumented warm image is **identity unknown**.
+Hash equality alone never attests its already-loaded Vars. Watch binds candidate
+hashes to the actual namespace reload and observed generation. Inode change times
+also reject transient save-and-restore during load/run. Config/classpath changes
+invalidate the warm image; restart through the bounded launcher. External REPL
+adapters must call `kaocha-sublime.image/invalidate!` after untracked evaluation
+that may change project Vars. This is a cooperative runner contract, not isolation
+from arbitrary code in the same JVM.
+
+`--since FILE|STAMP` remains a compatibility freshness hint and returns identity
+unknown (exit 2). The old mtime-only text is available explicitly with `--legacy`
+for human tooling; its exit status is not an agent acceptance contract. The
+[grammar and migration contract](docs/agent-v1.md) specifies every field and the
+PROBE/GATE adapter boundary. Never infer a verdict from raw stdout.
+
+Kaocha's watcher still determines which filesystem events schedule a run. It can
+miss rename-style saves and ignores delete notifications. MARK/FOLLOW will not
+manufacture a run: use a watched in-place save, Enter, or an explicit bounded run.
+Hash-detected changes are fed into the existing reload tracker, including
+same-mtime changes and removal of isolated namespaces.
 
 ## Affected selection and validation
 
@@ -164,10 +158,10 @@ signals cannot be inferred. Use declared namespace dependencies and editor saves
 that generate watch events; disable narrowing when static coverage is inadequate.
 Use one JVM per worktree; concurrent Kaocha runs in one JVM are unsupported.
 
-Validation: `clojure -M:test`, `python3 scripts/process_witnesses.py`,
+Validation: `clojure -J-Xms64m -J-Xmx512m -M:test`, `python3 scripts/process_witnesses.py`,
 `python3 scripts/cli_witnesses.py`, and `~/bin/clj-kondo --lint src test`.
 Verify the retained run artifacts without recreating worktrees with
-`clojure -M scripts/verify_evidence.clj`.
+`clojure -J-Xms64m -J-Xmx512m -M scripts/verify_evidence.clj`.
 The process witnesses use `/var/tmp/forge/kaocha-sublime-fx/` and kill exact PIDs.
 The stopwatch harness is adapted from the supplied baseline; raw evidence and
 its limitations live in `evidence/` and `docs/plan.md`.
@@ -179,4 +173,11 @@ acceptance sequence in a fresh mvr fixture under `/var/tmp/forge/kaocha-status-f
 Release work: choose a license and published Maven/Git coordinates after the
 remote exists; upstream the summary-path adapter; test a supported Kaocha version
 matrix and other plugin ordering/reporters; set a release version and CI gates.
-No artifact has been published.
+No Maven artifact has been published.
+
+Agent process witnesses: `python3 scripts/agent_witnesses.py` and
+`python3 scripts/agent_watch_witness.py`. The MVR ceiling witness is
+`python3 scripts/agent_mvr_witness.py` (an isolated, fresh fixture is required).
+Each witness JVM uses `-Xms64m -Xmx512m`; raw results are retained under
+`evidence/agent-v1/`. These are correctness and absolute wall/byte measurements,
+not a matched speedup claim.

@@ -16,9 +16,9 @@ subprocess.run(['git', 'init', '-q'], cwd=ROOT, check=True)
 subprocess.run(['git', 'add', '.'], cwd=ROOT, check=True)
 subprocess.run(['git', '-c', 'user.name=forge-anvil', '-c', 'user.email=forge-anvil@anvil',
                 'commit', '-qm', 'fixture\n\nCo-Authored-By: Gene Kim <genek@itrevolution.com>'], cwd=ROOT, check=True)
-cp = subprocess.check_output(['clojure', '-Spath'], cwd=REPO, text=True).strip()
+cp = subprocess.check_output(['clojure', '-J-Xms64m', '-J-Xmx512m', '-Spath'], cwd=REPO, text=True).strip()
 cp = ':'.join(str((REPO / p).resolve()) for p in cp.split(':')) + ':' + str(ROOT / 'src')
-cmd = ['java', '-Xmx256m', '-cp', cp, 'clojure.main', '-m', 'kaocha.runner', '--affected-since']
+cmd = ['java', '-Xms64m', '-Xmx512m', '-cp', cp, 'clojure.main', '-m', 'kaocha.runner', '--affected-since']
 cases = [('leaf', 'test/sample/core_test.clj', '4 tests, 3 assertions', 'AFFECTED 1/2'),
          ('source', 'src/sample/core.clj', '4 tests, 3 assertions', 'AFFECTED 1/2'),
          ('deps', 'deps.edn', '5 tests, 4 assertions', 'AFFECTED FULL:'),
