@@ -14,11 +14,20 @@
 (defonce run-lock (java.util.concurrent.locks.ReentrantLock.))
 (defonce cold-launch? (atom false))
 
+(defn invalidate!
+  "Adapters call this after untracked REPL evaluation that may alter project Vars.
+  A probe then stays unknown; the next watch run repairs through a full reload."
+  []
+  (swap! observed inc)
+  (swap! images #(into {} (map (fn [[dir state]] [dir (assoc state :trusted? false)])) %))
+  nil)
+
 (defn mode [config]
   (let [stack (map #(.getClassName ^StackTraceElement %) (.getStackTrace (Thread/currentThread)))]
     (cond (:kaocha.watch/tracker config) :watch
           (some #(str/starts-with? % "kaocha.repl$") stack) :probe
-          (some #(str/starts-with? % "kaocha.runner$") stack) :gate
+          (and (some #(str/starts-with? % "kaocha.runner$") stack)
+               (boolean (re-find #"(?:^| )-m kaocha\.runner(?: |$)" (System/getProperty "sun.java.command" "")))) :gate
           :else :probe)))
 
 (defn session [config config-hash]
@@ -46,7 +55,11 @@
      :classpath-generation (candidate/data-hash [cp-stamps external-content])}))
 
 (defn capture [session]
-  {:manifest (candidate/snapshot session) :observed @observed})
+  {:manifest (candidate/snapshot session) :observed @observed
+   :file-stamps (candidate/change-stamps session)
+   :classpath-stable? (or (nil? (:classpath-stamps session))
+                          (= (:classpath-stamps session)
+                             (candidate/classpath-stamps (keys (:classpath-stamps session)))))})
 
 (defn- code-file? [p] (or (str/ends-with? p ".clj") (str/ends-with? p ".cljc")))
 
@@ -93,10 +106,12 @@
           valid-base? (if previous
                         (and (or (:trusted? previous) repaired?) (= (:generation previous) (:generation state))
                              changed-covered?)
-                        @cold-launch?)
+                        (and @cold-launch? (empty? @images)))
           result (f tracker)
           after (capture state)
-          exact? (and valid-base? (candidate/stable-image? before after)
+          exact? (and valid-base? (some? (:file-stamps before)) (some? (:file-stamps after))
+                      (:classpath-stable? before) (:classpath-stable? after)
+                      (candidate/stable-image? before after)
                       (= (:manifest state) (:manifest before))
                       (= (:observed state) (:observed before)))]
       (reset! (:attestation state) {:exact? (boolean exact?) :loaded after
@@ -114,16 +129,20 @@
   (let [previous (get @images (:dir state))]
     (cond
       (= :watch (:mode state)) false
-      (nil? previous) (= :gate (:mode state))
+      (nil? previous) (and (= :gate (:mode state)) (empty? @images))
       :else (and (:trusted? previous) (= (:generation previous) (:generation state))
                  (= (:manifest previous) (:manifest state))
                  (= (:observed previous) (:observed state))))))
 
 (defn finish-identity! [state]
   (let [after (capture state)
-        exact? (and @(:configuration-valid? state) (:exact? @(:attestation state))
-                    (candidate/stable-image? (select-keys state [:manifest :observed]) after))]
+        exact? (and (some? (:file-stamps state)) (some? (:file-stamps after))
+                    (:classpath-stable? after) @(:configuration-valid? state) (:exact? @(:attestation state))
+                    (candidate/stable-image? (select-keys state [:manifest :observed :file-stamps]) after))]
     (swap! (:attestation state) assoc :finish-observed (:observed after)
+           :file-stamps-stable? (and (some? (:file-stamps state))
+                                    (= (:file-stamps state) (:file-stamps after)))
+           :classpath-stable? (:classpath-stable? after)
            :disk-stable? (= (:manifest state) (:manifest after))
            :configuration-valid? @(:configuration-valid? state))
     (swap! images assoc (:dir state)

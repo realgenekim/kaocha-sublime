@@ -1,0 +1,80 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+
+Testing kaocha-sublime.plugins-test
+
+Testing kaocha-sublime.receipt-test
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+
+Testing kaocha-sublime.affected-test
+
+Testing kaocha-sublime.status-test
+
+Testing kaocha-sublime.intent-contract-test
+
+Testing kaocha-sublime.agent-test
+
+ERROR in (captured-output-is-bounded-and-never-protocol-input) (agent_test.clj:19)
+Uncaught exception, not in assertion.
+expected: nil
+  actual: clojure.lang.ExceptionInfo: Not implemented: kaocha-sublime.agent/bounded-buffer!
+{}
+ at kaocha_sublime.agent_test$invoke$fn__6509.doInvoke (agent_test.clj:19)
+    clojure.lang.RestFn.applyTo (RestFn.java:140)
+    clojure.core$apply.invokeStatic (core.clj:667)
+    clojure.core$apply.invoke (core.clj:662)
+    kaocha_sublime.agent_test$invoke.invokeStatic (agent_test.clj:18)
+    kaocha_sublime.agent_test$invoke.doInvoke (agent_test.clj:17)
+    clojure.lang.RestFn.invoke (RestFn.java:426)
+    kaocha_sublime.agent_test$fn__7043.invokeStatic (agent_test.clj:291)
+    kaocha_sublime.agent_test/fn (agent_test.clj:289)
+    clojure.test$test_var$fn__9894.invoke (test.clj:717)
+    clojure.test$test_var.invokeStatic (test.clj:717)
+    clojure.test$test_var.invoke (test.clj:708)
+    clojure.test$test_vars$fn__9920$fn__9925.invoke (test.clj:735)
+    clojure.test$default_fixture.invokeStatic (test.clj:687)
+    clojure.test$default_fixture.invoke (test.clj:683)
+    clojure.test$test_vars$fn__9920.invoke (test.clj:735)
+    clojure.test$default_fixture.invokeStatic (test.clj:687)
+    clojure.test$default_fixture.invoke (test.clj:683)
+    clojure.test$test_vars.invokeStatic (test.clj:731)
+    clojure.test$test_all_vars.invokeStatic (test.clj:737)
+    clojure.test$test_ns.invokeStatic (test.clj:758)
+    clojure.test$test_ns.invoke (test.clj:743)
+    clojure.core$map$fn__5954.invoke (core.clj:2772)
+    clojure.lang.LazySeq.force (LazySeq.java:50)
+    clojure.lang.LazySeq.realize (LazySeq.java:89)
+    clojure.lang.LazySeq.seq (LazySeq.java:106)
+    clojure.lang.Cons.next (Cons.java:41)
+    clojure.lang.RT.next (RT.java:733)
+    clojure.core$next__5470.invokeStatic (core.clj:64)
+    clojure.core$reduce1.invokeStatic (core.clj:946)
+    clojure.core$reduce1.invokeStatic (core.clj:936)
+    clojure.core$merge_with.invokeStatic (core.clj:3083)
+    clojure.core$merge_with.doInvoke (core.clj:3075)
+    clojure.lang.RestFn.applyTo (RestFn.java:142)
+    clojure.core$apply.invokeStatic (core.clj:669)
+    clojure.test$run_tests.invokeStatic (test.clj:768)
+    clojure.test$run_tests.doInvoke (test.clj:768)
+    clojure.lang.RestFn.invoke (RestFn.java:515)
+    kaocha_sublime.test_runner$_main.invokeStatic (test_runner.clj:6)
+    kaocha_sublime.test_runner$_main.doInvoke (test_runner.clj:5)
+    clojure.lang.RestFn.invoke (RestFn.java:400)
+    clojure.lang.AFn.applyToHelper (AFn.java:152)
+    clojure.lang.RestFn.applyTo (RestFn.java:135)
+    clojure.lang.Var.applyTo (Var.java:707)
+    clojure.core$apply.invokeStatic (core.clj:667)
+    clojure.main$main_opt.invokeStatic (main.clj:515)
+    clojure.main$main_opt.invoke (main.clj:511)
+    clojure.main$main.invokeStatic (main.clj:665)
+    clojure.main$main.doInvoke (main.clj:617)
+    clojure.lang.RestFn.applyTo (RestFn.java:140)
+    clojure.lang.Var.applyTo (Var.java:707)
+    clojure.main.main (main.java:40)
+
+Ran 43 tests containing 321 assertions.
+0 failures, 1 errors.

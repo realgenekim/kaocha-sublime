@@ -5,6 +5,7 @@
             [clojure.string :as str]
             [kaocha.hierarchy :as hierarchy]
             [kaocha.plugin :refer [defplugin]]
+            [kaocha.plugin.capture-output :as capture]
             [kaocha.result :as result]
             [kaocha.testable :as testable]
             [kaocha.watch :as watch]
@@ -49,6 +50,8 @@
 
 (def ^:dynamic *watch-events* nil)
 (def ^:dynamic *waiting-for-edit?* false)
+(def ^:dynamic *accepted-event* nil)
+(def ^:dynamic *reserve-after-drain!* nil)
 
 (declare begin!)
 
@@ -62,35 +65,48 @@
 
 ;; INTENT: STATUS-TRIGGER-003
 (defn- install-watch-adapter! []
+  (adapt! #'capture/make-buffer
+          (fn [f] (fn [] (if-let [state @image/active] (agent/bounded-buffer! state) (f)))))
   (adapt! #'watch/qput
           (fn [f] (fn [q event]
                     (when-not (keyword? event) (swap! image/observed inc))
                     (f q event))))
+  (adapt! #'watch/qtake
+          (fn [f] (fn [q]
+                    (let [event (f q)]
+                      (when *accepted-event* (reset! *accepted-event* event))
+                      event))))
   (adapt! #'watch/track-reload! (fn [f] (fn [tracker] (image/reload! f tracker))))
-  ;; Kaocha 1.91.1392 discards both the drained events and the run-loop branch.
-  ;; These wrappers observe its real queue; they neither manufacture events nor
-  ;; change reload/selection. Only run-loop's automatic branch rescans outside wait.
+  ;; Observe the real accepted batch. Reservation and START happen after the
+  ;; queue drain, before its caller can scan/reload anything, so START's trigger
+  ;; prefix and omitted count refer to the same complete batch as the receipt.
   (adapt! #'watch/drain-queue!
           (fn [f] (fn [q]
                     (let [events (f q)]
                       (when *watch-events* (swap! *watch-events* into events))
+                      (when *reserve-after-drain!* (*reserve-after-drain!* events))
                       events))))
   (adapt! #'watch/drain-and-rescan!
           (fn [f] (fn [q tracker paths]
-                    (binding [*watch-events* (atom [])]
-                      (let [at (str (Instant/now))
-                            pending (when-let [settings (::settings tracker)]
-                                      (begin! (assoc settings :kaocha.watch/tracker
-                                                     {::trigger {:files [] :at at}
-                                                      ::auto-followup? (not *waiting-for-edit?*)
-                                                      ::last-path (::last-path tracker)})))
-                            tracker (f q tracker paths)]
-                        (assoc tracker ::trigger {:files (event-files @*watch-events*) :at at}
-                               ::pending-state pending
-                               ::auto-followup? (not *waiting-for-edit?*)))))))
+                    (let [at (str (Instant/now)) pending (atom nil)
+                          accepted (when *accepted-event* @*accepted-event*)
+                          batch (fn [events] (event-files (cond-> events accepted (conj accepted))))]
+                      (binding [*watch-events* (atom [])
+                                *reserve-after-drain!*
+                                (fn [events]
+                                  (when-let [settings (::settings tracker)]
+                                    (reset! pending
+                                            (begin! (assoc settings :kaocha.watch/tracker
+                                                           {::trigger {:files (batch events) :at at}
+                                                            ::auto-followup? (not *waiting-for-edit?*)
+                                                            ::last-path (::last-path tracker)})))))]
+                        (let [tracker (f q tracker paths)]
+                          (assoc tracker ::trigger {:files (batch @*watch-events*) :at at}
+                                         ::pending-state @pending
+                                         ::auto-followup? (not *waiting-for-edit?*))))))))
   (adapt! #'watch/wait-and-rescan!
           (fn [f] (fn [q tracker paths ignore]
-                    (binding [*waiting-for-edit?* true]
+                    (binding [*waiting-for-edit?* true *accepted-event* (atom nil)]
                       (let [[tracker event] (f q tracker paths ignore)]
                         [(-> tracker
                              (assoc ::auto-followup? false)
@@ -126,18 +142,20 @@
                      (some #{'kaocha.report/agent} (if (vector? reporters) reporters [reporters])))]
     (if-not enabled? config
       (let [dir (candidate/canonical (::dir config "target/kaocha-runs/"))
-            caps (heap/current (::heap-ceiling-bytes config 536870912))
-            session (image/session config (::config-hash config))]
+            caps (heap/current (::heap-ceiling-bytes config 536870912))]
         (when-not (:admitted? caps)
           (let [state (agent/new-stream! {:dir dir :run-id (str "refused-" (UUID/randomUUID))
-                                           :mode (image/mode config) :session (:session session)})]
+                                           :mode (image/mode config) :session image/session-id})]
+            (candidate/publish-session! dir {:workspace (candidate/canonical ".")
+                                              :session image/session-id
+                                              :generation (candidate/data-hash [::config-hash :heap-cap])
+                                              :refused :heap-cap})
             (agent/refuse! state :heap-cap)
             (candidate/atomic-edn! (io/file dir "HEAP-REFUSAL") caps)
             (throw+ {:kaocha/early-exit 2 :reason :heap-cap})))
-        (assoc config ::agent? true ::agent-session session ::heap caps
-                      ;; Agent selection is a complete view. Human reporters remain
-                      ;; available in ordinary mode, including the old marker.
-                      :kaocha/reporter ['kaocha.report/agent])))))
+        (let [session (image/session config (::config-hash config))]
+          (assoc config ::agent? true ::agent-session session ::heap caps
+                        :kaocha/reporter ['kaocha.report/agent]))))))
 
 (defn- active-record [state]
   (merge (select-keys state [:run-id :started :trigger :auto-followup? :followup-of
@@ -180,7 +198,8 @@
                             {:files [] :at started})
                :auto-followup? (true? (get-in config [:kaocha.watch/tracker ::auto-followup?]))
                :followup-of (get-in config [:kaocha.watch/tracker ::last-path])
-               :config-hash (::config-hash config) :git-sha (git-sha)}]
+               :config-hash (::config-hash config) :git-sha (git-sha)
+               :heap (or (::heap config) (heap/current (::heap-ceiling-bytes config 536870912)))}]
     (if (::agent? config)
       (let [session (::agent-session config)
             snapshot (image/capture session)
@@ -258,6 +277,7 @@
                 trigger auto-followup? followup-of] :as state} (::state r)
         nodes (testable/test-seq-with-skipped r)
         coverage (when (:events state) (coverage-data r))
+        diagnostic (when (:events state) (agent/seal-diagnostics! state))
         identity (when (:events state) (image/finish-identity! state))
         receipt (cond-> {:run-id run-id :started started :finished (str (Instant/now))
                          :wall-ms (/ (- (System/nanoTime) nano) 1e6)
@@ -265,16 +285,16 @@
                          :totals (totals r)
                          :failures (mapv failure (filter hierarchy/fail-type?
                                                         (mapcat :kaocha.testable/events nodes)))
-                         :config-hash config-hash :jvm-pid (.pid (ProcessHandle/current))
+                         :config-hash config-hash :heap (:heap state) :jvm-pid (.pid (ProcessHandle/current))
                          :kaocha-version (kaocha-version) :plugin-version plugin-version}
                   (:events state)
                   (merge (select-keys state [:workspace :session :generation :candidate :manifest
-                                              :observed :mode :events :heap :classpath-generation])
+                                              :observed :file-stamps :mode :events :heap :classpath-generation])
                          (dissoc coverage :executed-tests :skipped-tests)
-                         {:schema 1 :identity identity
+                         {:schema 1 :identity identity :diagnostic diagnostic
                           :identity-proof (select-keys @(:attestation state)
                                                        [:base-valid? :changed-covered? :reload-stable? :reload-observed
-                                                        :scheduled :changed :finish-observed :disk-stable? :configuration-valid?])
+                                                        :scheduled :changed :finish-observed :disk-stable? :file-stamps-stable? :classpath-stable? :configuration-valid?])
                           :process-start (:process-start (active-record state))
                           :failure-budget @(:budget state) :failures @(:failures state)
                           :totals (assoc (totals r) :tests (:executed-tests coverage) :skipped (:skipped-tests coverage))
@@ -295,10 +315,11 @@
     (Files/delete (.toPath tmp))
     (reset! committed? true)
     (when (:events state)
-      (agent/done! state receipt)
-      (.release ^java.nio.channels.FileLock (get-in state [:lease :lock]))
-      (.close ^FileChannel (get-in state [:lease :channel]))
-      (.unlock image/run-lock))
+      (try (agent/done! state receipt)
+           (finally
+             (.release ^java.nio.channels.FileLock (get-in state [:lease :lock]))
+             (.close ^FileChannel (get-in state [:lease :channel]))
+             (.unlock image/run-lock))))
     (-> (cond-> r (:kaocha.watch/tracker r)
           (update :kaocha.watch/tracker
                   #(-> % (dissoc ::pending-state)
@@ -325,12 +346,16 @@
                  (do
                    (when (:events pending)
                      (reset! (:configuration-valid? pending)
-                             (= (:generation pending) (get-in config [::agent-session :generation]))))
+                             (and (= (:generation pending) (get-in config [::agent-session :generation]))
+                                  (= (:session pending) (get-in config [::agent-session :session])))))
                    (assoc pending :trigger (::trigger tracker)
                                   :auto-followup? (true? (::auto-followup? tracker))
                                   :config-hash (::config-hash config)))
                  (begin! config)))
-        config)))
+        (if (and (::agent? config)
+                 (some #(clojure.string/starts-with? (.getClassName ^StackTraceElement %) "kaocha.api$run")
+                       (.getStackTrace (Thread/currentThread))))
+          (assoc config ::state (begin! config)) config))))
   (pre-load [config]
     (let [state (or (::state config) (begin! config))
           reporter (:kaocha/reporter config)]

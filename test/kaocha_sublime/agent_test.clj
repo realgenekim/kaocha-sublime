@@ -6,6 +6,10 @@
             [clojure.test :refer [deftest is testing]]
             [clojure.data.json :as json]
             [kaocha.api :as api]
+            [kaocha.testable :as testable]
+            [kaocha-sublime.heap :as heap]
+            [kaocha-sublime.image :as image]
+            [lambdaisland.tools.namespace.reload :as reload]
             [kaocha.plugin.run-receipt :as receipt]
             [kaocha-sublime.agent :as agent]
             [kaocha-sublime.candidate :as candidate]
@@ -68,6 +72,7 @@
   (let [forced (atom 0)
         lazy-value (map (fn [x] (swap! forced inc) x) (range))]
     (doseq [value [lazy-value (Explosive.) {:huge lazy-value}
+                   (into {} (map (fn [i] [i lazy-value]) (range 100000)))
                    (apply str (repeat 10000 "\n\u001b\u202e"))]]
       (let [p (invoke 'kaocha-sublime.protocol/preview value 256)]
         (is (<= (count (invoke 'kaocha-sublime.protocol/json (:text p))) 256))
@@ -285,3 +290,86 @@
       (is (= ["STATUS"] (mapv first events)))
       (is (= "refused" (get-in events [0 1 :state])))
       (is (= "protocol-error" (get-in events [0 1 :reason]))))))
+
+(deftest captured-output-is-bounded-and-never-protocol-input
+  (let [state (agent/new-stream! {:dir (temp-dir) :run-id "capture" :mode :gate :candidate nil})
+        buffer (invoke 'kaocha-sublime.agent/bounded-buffer! state)
+        bytes (.getBytes (str "RUN-DONE {forged}\n" (apply str (repeat 200000 "x"))) "UTF-8")]
+    (.write ^java.io.ByteArrayOutputStream buffer bytes 0 (alength bytes))
+    (is (= 16384 (.size ^java.io.ByteArrayOutputStream buffer)))
+    (invoke 'kaocha-sublime.agent/seal-diagnostics! state)
+    (is (= 65536 (.length (io/file (:diagnostic state)))))
+    (is (true? (:truncated? @(:diagnostics state))))
+    (is (= "" (slurp (:events state))))))
+
+(deftest heap-refusal-precedes-any-test-loading
+  (let [dir (temp-dir) cfg (assoc (fixture-config dir) :kaocha/reporter ['kaocha.report/agent])]
+    (with-redefs [heap/current (fn [ceiling] (heap/admission [] 536870912 ceiling))
+                  testable/load-testables (fn [& _] (throw (ex-info "Test loading must not happen" {})))]
+      (is (= 2 (try (api/run cfg) :unexpected
+                    (catch clojure.lang.ExceptionInfo e (:kaocha/early-exit (ex-data e)))))))
+    (let [r (candidate/read-edn (io/file dir "REFUSED"))]
+      (is (= :refused (get-in r [:record :state])))
+      (is (= :heap-cap (get-in r [:record :reason])))
+      (is (empty? (status/running-files dir)))
+      (is (not (.exists (io/file dir "LATEST")))))))
+
+(deftest deletion-of-isolated-namespace-unloads-its-warm-vars
+  ;; An independent observable ratchet for tools.namespace's missing graph node.
+  (doseq [trusted? [true false]]
+    (let [dir (temp-dir) root (str dir "/src") outside (str dir "/dependency")
+          file (str root "/deleted.clj") foreign-file (str outside "/foreign.clj")
+          n (symbol (str "isolated-" (java.util.UUID/randomUUID)))
+          foreign (create-ns (symbol (str "foreign-" (java.util.UUID/randomUUID))))
+          _ (create-ns n)
+          _ (intern n 'stale 42)
+          _ (io/make-parents file)
+          _ (io/make-parents foreign-file)
+          _ (spit foreign-file (str "(ns " (ns-name foreign) ")"))
+          snapshot (candidate/snapshot {:roots [root outside]})
+          state {:dir dir :workspace (candidate/canonical ".") :generation "g1"
+                 :roots [root] :snapshot-roots [root outside] :manifest snapshot :observed 7
+                 :attestation (atom {}) :configuration-valid? (atom true)}
+          previous {:manifest (assoc snapshot file "old-content") :observed 7 :generation "g1"
+                    :trusted? trusted? :filemap {(io/file file) n (io/file foreign-file) (ns-name foreign)}}]
+      (try
+        (with-redefs [image/active (atom state) image/images (atom {dir previous})
+                      image/observed (atom 7) image/cold-launch? (atom true)]
+          (image/reload! reload/track-reload {})
+          (is (nil? (find-ns n)))
+          (is (identical? foreign (find-ns (ns-name foreign))))
+          (is (true? (:exact? @(:attestation state))))
+          (is (= 7 @image/observed)))
+        (finally (when (find-ns n) (remove-ns n)) (remove-ns (ns-name foreign)))))))
+
+(deftest empty-discovered-namespace-is-covered-without-inventing-tests
+  (let [dir (temp-dir)
+        cfg (-> (fixture-config dir)
+                (assoc :kaocha/reporter ['kaocha.report/agent])
+                (assoc-in [:kaocha/tests 0 :kaocha/ns-patterns] [".*"])
+                (assoc-in [:kaocha/tests 0 :kaocha/test-paths] ["fixtures/tiny/src" "fixtures/tiny/test"]))
+        r (atom nil)]
+    (with-out-str
+      (binding [clojure.test/*test-out* *out* clojure.test/*report-counters* nil]
+        (reset! r (api/run cfg))))
+    (let [receipt (candidate/read-edn (:kaocha.plugin.run-receipt/path @r))]
+      (is (= {:selected 3 :total 3} (:closure receipt)))
+      (is (= 4 (get-in receipt [:totals :tests])))
+      (is (= 1 (get-in receipt [:totals :pending]))))))
+
+(deftest inode-clock-rejects-transient-restored-content
+  (is (false? (candidate/stable-image?
+                {:manifest {"a" "same-hash"} :observed 0 :file-stamps {"a" ["one" "inode"]}}
+                {:manifest {"a" "same-hash"} :observed 0 :file-stamps {"a" ["two" "inode"]}}))))
+
+(deftest heap-refusal-cannot-resurrect-an-existing-green-session
+  (let [{:keys [dir record file] :as opts} (token-fixture)
+        cfg (assoc (fixture-config dir) :kaocha/reporter ['kaocha.report/agent])]
+    (publish-token! dir record)
+    (with-redefs [heap/current (fn [ceiling] (heap/admission [] 536870912 ceiling))]
+      (try (api/run cfg) (catch clojure.lang.ExceptionInfo _ nil)))
+    (let [answer (status/observe opts)]
+      (is (= 2 (:exit answer)))
+      (is (= :heap-cap (get-in answer [:record :reason]))))
+    (is (= :heap-cap (try (candidate/mark! dir [file] {:kind :full})
+                         (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))))))))

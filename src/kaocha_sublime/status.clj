@@ -157,13 +157,15 @@
     (when (and r (= (:run-id p) (:run-id r)) (= (:finished p) (:finished r))
                (= (candidate/canonical dir) (some-> path io/file .getParent candidate/canonical))
                (= (:sha256 p) (candidate/file-hash path))
-               (= 1 (:schema r)))
+               (= 1 (:schema r))
+               (= (:candidate r) (candidate/candidate-id r)))
       (assoc r ::path path))))
 
 (defn- primary [r]
   (if (and (:auto-followup? r) (empty? (get-in r [:trigger :files])) (:followup-of r))
     (let [p (read-edn (:followup-of r))]
-      (if (and p (= (:parent r) (:run-id p))
+      (if (and p (= 1 (:schema p)) (= (:candidate p) (candidate/candidate-id p))
+               (= (:parent r) (:run-id p))
                (= (:parent-sha256 r) (candidate/file-hash (:followup-of r)))
                (exact? r p))
         (assoc p ::path (:followup-of r)) r)) r))
@@ -176,6 +178,8 @@
                                   :coverage (if covered? :complete :partial)
                                   :outcome (:outcome record)})]
     (cond
+      (not (protocol/valid-record? :done record))
+      (response :refused :protocol-error (:token token))
       (not= identity :exact) (response :unavailable :identity-unproved (:token token) {:id (:run-id r) :receipt (::path r)})
       (and (not covered?) (not (contains? #{:fail :error} (:outcome record))))
       (response :uncovered :scope-missing (:token token) {:id (:run-id r) :identity :exact :receipt (::path r)})
@@ -194,9 +198,14 @@
         refused (read-edn (io/file dir "REFUSED"))]
     (cond
       (nil? t) (response :unavailable :no-receipt token)
+      (or (not= 1 (:schema t))
+          (not= (:candidate t) (candidate/candidate-id t))
+          (not= token (candidate/data-hash [(:candidate t) (:required-scope t) (:required-paths t)])))
+      (response :refused :protocol-error token)
       (or (not= (:workspace t) (candidate/canonical (or workspace ".")))
           (not= (:workspace t) (:workspace session)))
       (response :refused :protocol-error token)
+      (:refused session) (response :refused (:refused session) token)
       (or (not= (:session t) (:session session)) (not= (:generation t) (:generation session))
           (and (:classpath-stamps t)
                (not= (:classpath-stamps t) (candidate/classpath-stamps (keys (:classpath-stamps t))))))

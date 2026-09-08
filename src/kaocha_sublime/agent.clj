@@ -7,7 +7,8 @@
             [kaocha.report]
             [kaocha-sublime.candidate :as candidate]
             [kaocha-sublime.protocol :as protocol])
-  (:import (java.nio.file Files)))
+  (:import (java.nio.file Files)
+           (java.io ByteArrayOutputStream FileOutputStream)))
 
 (def ^:dynamic *stream* nil)
 
@@ -16,8 +17,44 @@
     (io/make-parents events)
     (Files/createFile (.toPath events) (make-array java.nio.file.attribute.FileAttribute 0))
     (assoc state :events (str events)
+                 :diagnostic (str (io/file dir (str run-id ".diagnostic")))
+                 :diagnostic-out (FileOutputStream. (io/file dir (str run-id ".diagnostic")))
+                 :diagnostics (atom {:bytes 0 :truncated? false :sealed? false})
                  :budget (atom {:shown 0 :omitted 0 :bytes 0 :seen 0})
                  :failures (atom []) :refused? (atom false))))
+
+(defn- capture-bytes! [state data offset length]
+  (locking state
+    (when-not (:sealed? @(:diagnostics state))
+      (let [n (min length (- 65536 (:bytes @(:diagnostics state))))]
+        (when (pos? n) (.write ^FileOutputStream (:diagnostic-out state) ^bytes data (int offset) (int n)))
+        (swap! (:diagnostics state) #(-> % (update :bytes + n)
+                                         (update :truncated? (fn [old] (or old (< n length))))))))))
+
+(defn bounded-buffer!
+  "Kaocha capture buffer with a per-test cap, teeing into the bounded run artifact.
+  Output that bypasses Kaocha capture remains the launcher's diagnostic stream."
+  [state]
+  (proxy [ByteArrayOutputStream] []
+    (write
+      ([data]
+       (if (instance? Integer data)
+         (let [bytes (byte-array [(unchecked-byte data)])]
+           (capture-bytes! state bytes 0 1)
+           (locking state (when (< (proxy-super size) 16384) (proxy-super write data))))
+         (.write ^ByteArrayOutputStream this ^bytes data 0 (alength ^bytes data))))
+      ([data offset length]
+       (capture-bytes! state data offset length)
+       (locking state
+         (let [n (min length (- 16384 (proxy-super size)))]
+           (when (pos? n) (proxy-super write data offset n))))))))
+
+(defn seal-diagnostics! [state]
+  (locking state
+    (when-not (:sealed? @(:diagnostics state))
+      (swap! (:diagnostics state) assoc :sealed? true)
+      (.close ^FileOutputStream (:diagnostic-out state))))
+  (assoc (dissoc @(:diagnostics state) :sealed?) :path (:diagnostic state)))
 
 (defn common [state]
   {:v 1 :id (:run-id state) :mode (:mode state) :candidate (:candidate state)})
@@ -33,7 +70,8 @@
       (candidate/atomic-edn! (io/file (:dir state) "REFUSED")
                             {:run-id (:run-id state) :session (:session state)
                              :candidate (:candidate state) :record r})
-      (emit! state :status r))))
+      (emit! state :status r)
+      (seal-diagnostics! state))))
 
 (defn start! [state]
   (let [files (get-in state [:trigger :files])

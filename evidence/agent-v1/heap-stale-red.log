@@ -1,0 +1,34 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+
+Testing kaocha-sublime.plugins-test
+
+Testing kaocha-sublime.receipt-test
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+
+Testing kaocha-sublime.affected-test
+
+Testing kaocha-sublime.status-test
+
+Testing kaocha-sublime.intent-contract-test
+
+Testing kaocha-sublime.agent-test
+
+FAIL in (heap-refusal-cannot-resurrect-an-existing-green-session) (agent_test.clj:371)
+expected: (= 2 (:exit answer))
+  actual: (not (= 2 0))
+
+FAIL in (heap-refusal-cannot-resurrect-an-existing-green-session) (agent_test.clj:372)
+expected: (= :heap-cap (get-in answer [:record :reason]))
+  actual: (not (= :heap-cap nil))
+
+FAIL in (heap-refusal-cannot-resurrect-an-existing-green-session) (agent_test.clj:373)
+expected: (= :heap-cap (try (candidate/mark! dir [file] {:kind :full}) (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+  actual: (not (= :heap-cap "2de7605b99372c6f5d7fddf4693fd525ba5bcf8d7d8972bc64d6f377f625a3c0"))
+
+Ran 48 tests containing 344 assertions.
+3 failures, 0 errors.

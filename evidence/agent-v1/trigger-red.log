@@ -1,0 +1,5 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+
+FAIL in (running-reservation-precedes-watcher-scan) (receipt_test.clj:79)
+expected: (= [(str file)] (get-in active [:trigger :files]))
+  actual: (not (= ["/var/tmp/forge/kaocha-sublime-14978941361851461785/a.clj"] []))

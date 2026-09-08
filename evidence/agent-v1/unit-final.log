@@ -1,0 +1,22 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+
+Testing kaocha-sublime.plugins-test
+
+Testing kaocha-sublime.receipt-test
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+
+Testing kaocha-sublime.affected-test
+
+Testing kaocha-sublime.status-test
+
+Testing kaocha-sublime.intent-contract-test
+
+Testing kaocha-sublime.agent-test
+
+Ran 48 tests containing 347 assertions.
+0 failures, 0 errors.

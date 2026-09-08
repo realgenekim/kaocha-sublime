@@ -32,11 +32,32 @@
 
 (defn classpath-stamps [paths]
   (into (sorted-map)
-        (map (fn [p] (let [f (io/file p)] [p (when (.isFile f) [(.length f) (.lastModified f)])]))) paths))
+        (map (fn [p] (let [f (io/file p)] [p (when (.isFile f) [(.length f) (.lastModified f) (file-hash f)])]))) paths))
+
+(defn files-under [root]
+  (let [f (io/file root)]
+    (if-not (.exists f) []
+      (with-open [paths (Files/walk (.toPath f) (make-array java.nio.file.FileVisitOption 0))]
+        (mapv #(.toFile ^java.nio.file.Path %) (iterator-seq (.iterator paths)))))))
+
+(defn change-stamps
+  "Linux inode/change-time observation, including directory entry changes.
+  Nil means the filesystem cannot attest this boundary; never invent a clock."
+  [{:keys [roots snapshot-roots config-files classpath-stamps]}]
+  (try
+    (let [roots (or snapshot-roots roots)
+          files (distinct (concat (mapcat files-under roots)
+                                   (map io/file config-files) (map io/file (keys classpath-stamps))) )]
+      (into (sorted-map)
+            (for [f files :when (.exists ^java.io.File f)
+                  :let [attrs (Files/readAttributes (.toPath ^java.io.File f) "unix:ctime,ino"
+                                                    (make-array java.nio.file.LinkOption 0))]]
+              [(canonical f) [(str (.get attrs "ctime")) (str (.get attrs "ino"))]])))
+    (catch Exception _ nil)))
 
 (defn snapshot [{:keys [roots snapshot-roots config-files]}]
   (into (sorted-map)
-        (for [f (distinct (concat (mapcat #(file-seq (io/file %)) (or snapshot-roots roots)) (map io/file config-files)))
+        (for [f (distinct (concat (mapcat files-under (or snapshot-roots roots)) (map io/file config-files)))
               :when (.isFile ^java.io.File f)]
           [(canonical f) (file-hash f)])))
 
@@ -59,6 +80,8 @@
                                        {:kind :namespaces :namespaces (vec (sort (distinct nses)))})
                          (throw (ex-info "Unknown required scope" {:reason :protocol-error})))
         session (read-edn (io/file dir "SESSION"))
+        _ (when-let [reason (:refused session)]
+            (throw (ex-info "Runner admission refused" {:reason reason})))
         _ (when-not (and (:workspace session) (:session session) (:generation session))
             (throw (ex-info "No runner session" {:reason :identity-unproved})))
         paths (mapv canonical paths)
@@ -76,7 +99,8 @@
 ;; INTENT: AGENT-IMAGE-012
 (defn stable-image? [before after]
   (and (some? (:observed before)) (= (:observed before) (:observed after))
-       (= (:manifest before) (:manifest after))))
+       (= (:manifest before) (:manifest after))
+       (= (:file-stamps before) (:file-stamps after))))
 
 (defn changed [before after]
   (set (filter #(not= (get before %) (get after %))

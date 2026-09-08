@@ -74,7 +74,9 @@
                                           (.listFiles (io/file dir)))]
                       (is (= 1 (count running)) "RUNNING covers rescan, not just test execution")
                       (when (seq running)
-                        (is (= :running (:status (edn/read-string (slurp (first running))))))))
+                        (let [active (edn/read-string (slurp (first running)))]
+                          (is (= :running (:status active)))
+                          (is (= [(str file)] (get-in active [:trigger :files]))))))
                     tracker)]
       (watch/wait-and-rescan! q {:kaocha.plugin.run-receipt/settings
                                  {:kaocha.plugin.run-receipt/dir dir}}
