@@ -7,5 +7,5 @@
                          :let [[name & body] (:children hook)]]
                      (api/list-node
                        (concat [(api/token-node 'defn)
-                                (api/token-node (symbol (str (clojure.core/name (api/sexpr id)) "-" (api/sexpr name))))]
+                                (api/token-node (symbol (str (clojure.core/name (api/sexpr id)) "-" (api/sexpr name) "-hook")))]
                                body)))))}))

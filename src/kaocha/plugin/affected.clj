@@ -5,6 +5,7 @@
             [clojure.set :as set]
             [clojure.string :as str]
             [kaocha.plugin :refer [defplugin]]
+            [kaocha.result :as result]
             [kaocha.testable :as testable]
             [kaocha.plugin.run-receipt :as receipt]
             [lambdaisland.tools.namespace.dependency :as dep]
@@ -62,18 +63,21 @@
               filemap (into {} (map (fn [[f n]] [(canonical-path f) n])) (::file/filemap tracker))
               graph (::track/deps tracker)
               known (set (vals filemap))
+              followup (when (and (some? changed) (empty? changed))
+                         (::followup watch-tracker))
               bad (first (remove #(and (str/ends-with? % ".clj") (contains? filemap %)
                                       (.isFile (io/file %))) changed))
               reason (cond
                        (nil? changed) "changed set unknown (initial run or no tracker snapshot)"
-                       (empty? changed) "no changed files known (manual run or watch follow-up)"
+                       (and (empty? changed) (not followup)) "no changed files known (manual run)"
                        (:kaocha.watch/tracker-error tracker) "tracker error"
                        (seq (::file/load-error tracker)) "namespace scan error"
                        bad (str "non-namespace, missing, or unsupported changed file: " bad)
                        (nil? graph) "dependency graph unavailable")]
           (merge {:snapshot now :files (vec (sort changed)) :known known}
                  (if reason {:reason reason}
-                     {:closure (closure graph known (set (map filemap changed)))})))
+                     {:closure (if followup (:closure followup)
+                                   (closure graph known (set (map filemap changed))))})))
         (catch Exception e {:reason (str "selection unavailable: " (.getMessage e)) :files []})))))
 
 (defn- namespace-nodes [plan]
@@ -118,9 +122,21 @@
         ;; Kaocha's watch focus is transient. A resource/config fallback must not
         ;; quietly run only yesterday's failing test. Preserve explicit CLI focus.
         (and d (:kaocha.watch/focus config))
-        (assoc :kaocha.filter/focus (get-in config [:kaocha/cli-options :focus])))))
+        (assoc :kaocha.filter/focus (or (get-in config [:kaocha/cli-options :focus])
+                                      (get-in config [:kaocha.watch/tracker ::base-focus]))))))
   (pre-load [config]
     (cond-> config
       (and (:kaocha.watch/tracker config) (get-in config [::decision :snapshot]))
-      (assoc-in [:kaocha.watch/tracker ::snapshot] (get-in config [::decision :snapshot]))))
-  (pre-run [plan] (apply-selection plan)))
+      (assoc-in [:kaocha.watch/tracker ::snapshot] (get-in config [::decision :snapshot]))
+      (and (:kaocha.watch/tracker config)
+           (not (contains? (:kaocha.watch/tracker config) ::base-focus)))
+      (assoc-in [:kaocha.watch/tracker ::base-focus] (:kaocha.filter/focus config))))
+  (pre-run [plan] (apply-selection plan))
+  (post-run [r]
+    (cond-> r
+      (:kaocha.watch/tracker r)
+      (assoc-in [:kaocha.watch/tracker ::followup]
+                (when (and (seq (:kaocha.watch/focus r))
+                           (not (result/failed? r))
+                           (nil? (get-in r [::selection :reason])))
+                  (select-keys (::decision r) [:closure]))))))

@@ -57,3 +57,22 @@
                :kaocha.filter/focus [:app.core-test/test]})]
     (is (string? (get-in cfg [:kaocha.plugin.affected/decision :reason])))
     (is (empty? (:kaocha.filter/focus cfg)))))
+
+(deftest successful-focused-followup-reuses-selection-once
+  (let [{:keys [root config]} (selection-fixture)]
+    (spit (io/file root "leaf.clj") "\n; edited" :append true)
+    (let [selected (select! config)
+          done (-> selected
+                   (assoc :kaocha.watch/focus [:app.core-test/test]
+                          :kaocha.result/tests [])
+                   affected/affected-pre-load-hook
+                   ((or (resolve 'kaocha.plugin.affected/affected-post-run-hook) identity)))
+          next-config (assoc config :kaocha.watch/tracker (:kaocha.watch/tracker done))
+          followup (select! next-config)
+          selection (:kaocha.plugin.affected/selection followup)]
+      (is (nil? (:reason selection)))
+      (is (= ['app.core-test] (:namespaces selection)))
+      (let [after (if-let [f (resolve 'kaocha.plugin.affected/affected-post-run-hook)]
+                    (f (assoc followup :kaocha.result/tests [])) followup)
+            manual (select! (assoc next-config :kaocha.watch/tracker (:kaocha.watch/tracker after)))]
+        (is (string? (get-in manual [:kaocha.plugin.affected/selection :reason])))))))

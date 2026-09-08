@@ -100,3 +100,11 @@ before/after table (red median/p95 and green), exact receipt, fixture counts,
 limitations, release remainder. Repo README includes local/root deps coordinates,
 tests.edn enablement and coldstart boot line naming the returned receipt path.
 No remote creation or push (Gene owns the remote after first report).
+
+Implementation refinements from executable witnesses:
+- REPL adapter wraps result/totals and preserves paths on tagged suite results;
+  it also works when the plugin is first loaded from inside repl/run.
+- Watch automatically runs again after focused green. post-run carries a one-use
+  closure in the tracker; only this immediate unchanged follow-up reuses it.
+  A subsequent manual run still falls back full. The initial lost arm is retained.
+- Recheck destination after exclusive tmp reservation to close fixed-id races.

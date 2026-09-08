@@ -1,0 +1,24 @@
+Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/var/tmp/forge
+
+Testing kaocha-sublime.plugins-test
+
+Testing kaocha-sublime.receipt-test
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+[33mWARNING: [mDid not load a configuration file and using the defaults.
+This is fine for experimenting, but for long-term use, we recommend creating a configuration file to avoid changes in behavior between releases.
+To create a configuration file using the current defaults and configuration file location, create a file named tests.edn that contains '#kaocha/v1 {}'.
+
+Testing kaocha-sublime.affected-test
+
+FAIL in (successful-focused-followup-reuses-selection-once) (affected_test.clj:73)
+expected: (nil? (:reason selection))
+  actual: (not (nil? "no changed files known (manual run or watch follow-up)"))
+
+FAIL in (successful-focused-followup-reuses-selection-once) (affected_test.clj:74)
+expected: (= [(quote app.core-test)] (:namespaces selection))
+  actual: (not (= [app.core-test] [app.core-test app.other-test]))
+
+Ran 9 tests containing 36 assertions.
+2 failures, 0 errors.

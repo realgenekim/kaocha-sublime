@@ -67,6 +67,9 @@
         tmp (io/file dir (str id ".edn.tmp"))
         _ (when (.exists path) (throw (ex-info "Receipt id already completed" {:path (str path)})))
         _ (Files/createFile (.toPath tmp) (make-array java.nio.file.attribute.FileAttribute 0))
+        _ (when (.exists path)
+            (Files/delete (.toPath tmp))
+            (throw (ex-info "Receipt id completed while reserving it" {:path (str path)})))
         state {:run-id id :started started :nano (System/nanoTime)
                :tmp tmp :path path :committed? (atom false)
                :config-hash (::config-hash config) :git-sha (git-sha)}]

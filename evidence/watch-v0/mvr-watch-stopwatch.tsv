@@ -1,0 +1,13 @@
+initial	initial			579 tests, 7833 assertions, 0 failures.
+1	red	0.516	1788885083.703214	2 tests, 4 assertions, 1 failures.
+1	green	0.065	1788885085.272477	2 tests, 4 assertions, 0 failures.
+2	red	6.489	1788885086.382859	2 tests, 4 assertions, 1 failures.
+2	green	0.054	1788885093.932933	2 tests, 4 assertions, 0 failures.
+3	red	6.271	1788885095.044615	2 tests, 4 assertions, 1 failures.
+3	green	0.081	1788885102.372199	2 tests, 4 assertions, 0 failures.
+4	red	6.440	1788885103.512884	579 tests, 7833 assertions, 13 failures.
+4	green	0.046	1788885111.001739	2 tests, 4 assertions, 0 failures.
+5	red	6.363	1788885112.114859	2 tests, 4 assertions, 1 failures.
+5	green	0.047	1788885119.572479	2 tests, 4 assertions, 0 failures.
+6	red	6.476	1788885120.689369	2 tests, 4 assertions, 1 failures.
+6	green	0.055	1788885128.245323	2 tests, 4 assertions, 0 failures.
