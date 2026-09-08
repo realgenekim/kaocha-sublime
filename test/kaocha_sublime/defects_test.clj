@@ -84,6 +84,28 @@
         (is (map? @(future (run! cfg))) "A different nREPL thread can acquire the next lease")
         (finally (emergency-cleanup!))))))
 
+;; INTENT-TEST: AGENT-LEASE-014
+(deftest failure-before-stream-does-not-leave-an-empty-reservation
+  (let [dir (temp-dir) cfg (config dir)]
+    (is (instance? Throwable
+                   (with-redefs [image/capture (fn [_] (throw (ex-info "snapshot failed" {})))]
+                     (run! cfg))))
+    (is (empty? (status/running-files dir)))
+    (is (not (.isLocked image/run-lock)))
+    (is (map? (run! cfg)))))
+
+;; INTENT-TEST: AGENT-LEASE-014
+(deftest lease-covers-the-final-summary
+  (let [held (atom nil) original clojure.test/do-report]
+    (with-redefs [clojure.test/do-report
+                  (fn [event]
+                    (when (= :summary (:type event))
+                      (reset! held (.isHeldByCurrentThread image/run-lock)))
+                    (original event))]
+      (run! (config (temp-dir))))
+    (is (true? @held))
+    (is (not (.isLocked image/run-lock)))))
+
 (defn skip-fixture [dir]
   (let [root (str dir "/test") file (str root "/declared_gate_test.clj")]
     (io/make-parents file)

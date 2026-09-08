@@ -239,12 +239,14 @@
         tmp (io/file dir (str id ".edn.tmp"))
         _ (when (.exists path) (throw (ex-info "Receipt id already completed" {:path (str path)})))
         lease (when (::agent? config) (reserve-lock! dir))
-        pending (atom nil)]
+        pending (atom nil)
+        reserved? (atom false)]
     (try
       (let [dead (when lease (filterv #(= :dead (candidate/process-state %))
                                      (keep candidate/read-edn (status/running-files (str dir)))))
         _ (when (seq dead) (reap/reap! (str dir)))
         _ (Files/createFile (.toPath tmp) (make-array java.nio.file.attribute.FileAttribute 0))
+        _ (reset! reserved? true)
         _ (when (.exists path)
             (Files/delete (.toPath tmp))
             (throw (ex-info "Receipt id completed while reserving it" {:path (str path)})))
@@ -278,7 +280,12 @@
         state)
       (do (spit tmp (edn-str (active-record state))) state)))
       (catch Throwable t
-        (try (cleanup! @pending) (finally (release! {:lease lease})))
+        (try
+          (cleanup! @pending)
+          (finally
+            (try
+              (when @reserved? (Files/deleteIfExists (.toPath tmp)))
+              (finally (release! {:lease lease})))))
         (throw t)))))
 
 (defn- totals [r]
@@ -410,9 +417,8 @@
     (publish-latest! path receipt)
     (Files/delete (.toPath tmp))
     (reset! committed? true)
-    (when (:events state)
-      (try (agent/done! state receipt)
-           (finally (release! state))))
+    ;; The outer run finally also covers Kaocha's subsequent summary callback.
+    (when (:events state) (agent/done! state receipt))
     (-> (cond-> r (:kaocha.watch/tracker r)
           (update :kaocha.watch/tracker
                   #(-> % (dissoc ::pending-state)
