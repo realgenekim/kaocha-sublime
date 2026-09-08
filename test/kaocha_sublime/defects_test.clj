@@ -2,6 +2,7 @@
   (:refer-clojure :exclude [run!])
   (:import (java.lang ProcessHandle))
   (:require [clojure.java.io :as io]
+            [clojure.data.json :as json]
             [clojure.java.shell :as shell]
             [clojure.test :refer [deftest is]]
             [kaocha.api :as api]
@@ -275,4 +276,4 @@
       (when-not missing? (io/delete-file parent-path))
       (is (= done (-> (protocol/done-record receipt path (candidate/file-hash path))
                       protocol/json
-                      (clojure.data.json/read-str :key-fn keyword)))))))
+                      (json/read-str :key-fn keyword)))))))

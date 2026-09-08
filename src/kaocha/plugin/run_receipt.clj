@@ -1,6 +1,7 @@
 (ns kaocha.plugin.run-receipt
   "Atomic per-run EDN receipts for Kaocha 1.91.1392."
-  (:require [clojure.java.io :as io]
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
             [kaocha.api :as api]
@@ -369,6 +370,24 @@
      :executed-tests (count executed)
      :skipped-tests (- (count leaves) (count executed) (count pending))}))
 
+;; INTENT: AGENT-PARENT-OUTCOME-019
+(defn- parent-evidence [path]
+  ;; Bind the identity, digest and verdict to one read of the committed parent.
+  ;; Store this in the child so replay never depends on the parent's retention.
+  (try
+    (let [bytes (Files/readAllBytes (.toPath (io/file path)))
+          parent (edn/read-string (String. bytes "UTF-8"))
+          digest (sha256 bytes)
+          done (protocol/done-record parent path digest)]
+      {:parent (:run-id parent) :parent-sha256 digest
+       :parent-outcome (if (and (= 1 (:schema parent)) (:finished parent)
+                                (every? integer? (map done [:fail :error]))
+                                (protocol/valid-record? :done done))
+                         (select-keys done [:outcome :fail :error])
+                         protocol/unknown-parent-outcome)})
+    (catch Exception _
+      {:parent nil :parent-sha256 nil :parent-outcome protocol/unknown-parent-outcome})))
+
 (defn- finish! [r]
   (let [{:keys [run-id started nano tmp path committed? config-hash git-sha
                 trigger auto-followup? followup-of] :as state} (::state r)
@@ -394,9 +413,9 @@
                                                         :scheduled :changed :finish-observed :disk-stable? :file-stamps-stable? :classpath-stable? :configuration-valid?])
                           :process-start (:process-start (active-record state))
                           :failure-budget @(:budget state) :failures @(:failures state)
-                          :totals (assoc (totals r) :tests (:executed-tests coverage) :skipped (:skipped-tests coverage))
-                          :parent (when (and auto-followup? followup-of) (:run-id (candidate/read-edn followup-of)))
-                          :parent-sha256 (when (and auto-followup? followup-of) (candidate/file-hash followup-of))})
+                          :totals (assoc (totals r) :tests (:executed-tests coverage) :skipped (:skipped-tests coverage))}
+                         (if auto-followup? (parent-evidence followup-of)
+                             {:parent nil :parent-sha256 nil}))
                   git-sha (assoc :git-sha git-sha)
                   (and auto-followup? followup-of) (assoc :followup-of followup-of)
                   (:kaocha.plugin.affected/selection r)

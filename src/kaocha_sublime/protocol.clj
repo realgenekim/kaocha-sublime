@@ -176,8 +176,22 @@
   (nullable? #(and (map? %) (= #{:selected :total} (set (keys %)))
                    (uint? (:selected %)) (uint? (:total %)) (<= (:selected %) (:total %))) x))
 
+;; INTENT: AGENT-PARENT-OUTCOME-019
+(def unknown-parent-outcome {:outcome :unknown :fail nil :error nil})
+
+(defn- parent-outcome? [{:keys [outcome fail error] :as summary}]
+  (and (map? summary) (= #{:outcome :fail :error} (set (keys summary)))
+       (or (= unknown-parent-outcome summary)
+           (and (uint? fail) (uint? error)
+                (cond (pos? error) (= :error outcome)
+                      (pos? fail) (= :fail outcome)
+                      :else (contains? #{:pass :incomplete} outcome))))))
+
 (defn valid-record? [kind r]
-  (and (= 1 (:v r)) (= (record-keys kind) (set (keys r)))
+  (and (= 1 (:v r))
+       (= (cond-> (record-keys kind)
+            (and (= kind :done) (true? (:auto_followup r))) (conj :parent_outcome))
+          (set (keys r)))
        (every? #(nullable? (fn [s] (and (string? s) (boolean (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]{0,199}" s)))) %)
                (map r [:id :token :parent]))
        (every? #(nullable? (fn [s] (and (string? s) (boolean (re-matches #"[a-f0-9]{64}" s)))) %)
@@ -221,6 +235,7 @@
                                (and (uint? (:tests r)) (pos? (:tests r))
                                     (= 0 (:fail r) (:error r) (:pending r))))) true)
                     (closure? (:closure r)) (uint? (:wall_ms r)) (boolean? (:auto_followup r))
+                    (or (not (:auto_followup r)) (parent-outcome? (:parent_outcome r)))
                     (uint? (:shown r)) (<= (:shown r) 20) (uint? (:omitted r))
                     (absolute? (:receipt r)) (string? (:sha256 r)))
          false)))
@@ -247,11 +262,12 @@
 
 (defn done-record [receipt path digest]
   (let [totals (:totals receipt) coverage (:coverage receipt)]
-    (merge {:v 1 :id (:run-id receipt) :mode (:mode receipt) :candidate (:candidate receipt)
+    (cond-> (merge {:v 1 :id (:run-id receipt) :mode (:mode receipt) :candidate (:candidate receipt)
             :outcome (outcome totals coverage) :closure (:closure receipt) :coverage coverage
             :wall_ms (long (:wall-ms receipt)) :auto_followup (boolean (:auto-followup? receipt))
             :parent (:parent receipt) :shown (get-in receipt [:failure-budget :shown] 0)
             :omitted (get-in receipt [:failure-budget :omitted] 0) :receipt (str path) :sha256 digest}
            (select-keys (merge {:tests nil :assertions nil :pass nil :fail nil :error nil :pending nil :skipped nil}
-                               totals) [:tests :assertions :pass :fail :error :pending :skipped]))))
-
+                               totals) [:tests :assertions :pass :fail :error :pending :skipped]))
+      (:auto-followup? receipt)
+      (assoc :parent_outcome (get receipt :parent-outcome unknown-parent-outcome)))))

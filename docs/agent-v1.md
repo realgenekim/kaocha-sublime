@@ -4,7 +4,9 @@ The fixed prefix and ASCII JSON object form one record, terminated by LF. Only
 runner-owned `<id>.events` and `kaocha-status` output carry this protocol. Human
 output, captured test output, JVM diagnostics, and nREPL envelopes do not.
 
-The adopted design block, unchanged:
+The grammar remains `v:1`: `parent_outcome` is an additive field on automatic
+follow-up DONE records. Producers and strict readers must adopt this addition
+together; older strict readers reject the new key as a protocol error.
 
 ```text
 stream     := record LF ... ; UTF-8 transport, ASCII-only records, no ANSI/BOM/blank lines
@@ -21,7 +23,12 @@ RUN-DONE   := common + outcome:(pass|fail|error|incomplete), tests:(uint|null),
               assertions:(uint|null), pass:(uint|null), fail:(uint|null), error:(uint|null),
               pending:(uint|null), skipped:(uint|null), closure:(selected/total object|null),
               coverage:(complete|partial|unknown), wall_ms:uint, auto_followup:boolean,
-              parent:(id|null), shown:uint, omitted:uint, receipt:absolute-path, sha256:hex64
+              parent:(id|null), shown:uint, omitted:uint, receipt:absolute-path, sha256:hex64,
+              parent_outcome:parent-result ONLY when auto_followup=true (required then)
+parent-result := {"outcome":(pass|fail|error|incomplete|unknown),
+                  "fail":(uint|null),"error":(uint|null)}
+              unknown requires null counts; known outcomes require numeric counts;
+              error>0 requires error; else fail>0 requires fail; else pass|incomplete
 STATUS     := v:1, state:(marked|waiting|running|late|timeout|killed|superseded|uncovered|
               unavailable|refused), token:(string|null), id:(string|null),
               identity:(exact|unknown), elapsed_ms:(uint|null), phase:(queued|load|run|unknown),
@@ -45,6 +52,8 @@ order      := one START before load, zero or more FAIL, at most one committed DO
               replay may repeat records: deduplicate by id/type, and id/event for FAIL
 completion := DONE is an immutable run result, not a statement of freshness for every caller
               error outranks fail; neither failure nor missing/pending coverage becomes pass
+              auto_followup DONE also carries the parent's result and fail/error counts;
+              its own outcome does not override parent_outcome or select the primary
 accept     := follow-token exits 0 only for exact candidate + required coverage + pass;
               verified red exits 1; timeout/unknown/refused/incomplete exit 2
               terminal matched DONE is validated against the token by status/R12;
@@ -55,6 +64,20 @@ transport  := serialize records per destination; raw stdout/stderr cannot supply
 compat     := PROBE/GATE adapters map to mode; no second summary; unknown version/key,
               malformed/oversize/conflicting record => protocol-error, never success
 ```
+
+`parent_outcome` summarizes the immediate parent run from its committed receipt;
+the child receipt retains the summary as `:parent-outcome` alongside the parent
+ID and digest. A passing follow-up after a red primary therefore carries, for
+example, `"parent_outcome":{"outcome":"fail","fail":1,"error":0}`. A passing
+parent yields `pass` with zero fail/error counts. A missing or invalid parent
+receipt yields `unknown` with null counts, never `pass`; older child receipts
+without the persisted summary also project `unknown`. Replaying a completed
+child uses its persisted summary, even if the parent receipt has since gone.
+Primary DONE records omit this field. STATUS/FOLLOW selection and exit semantics
+are unchanged: the primary token still selects the primary. This addition
+implements [AGENT-PARENT-OUTCOME-019](intent/registry.edn), from blind-reader
+witness case 4 (clj-surgeon-records `2035d62a`,
+`docs/observations/2026-09-08-blind-reader-witness.md`).
 
 A DONE with inconsistent arithmetic (`assertions != pass + fail + error`) is a
 **protocol-error**, never pass and never merely an ordinary red test result.

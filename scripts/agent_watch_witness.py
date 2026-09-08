@@ -69,6 +69,7 @@ try:
             break
         time.sleep(.03)
     assert child and child['auto_followup'], child
+    assert child['parent_outcome'] == {'outcome': 'pass', 'fail': 0, 'error': 0}, child
     assert follow(green_token)[2]['id'] == primary
     record('automatic-followup-primary', primary=primary, child=child)
 
