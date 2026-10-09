@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""One owned, test-only warm nREPL per Clojure project root (kaocha-sublime.runner).
+
+usage: sublime-loop [--root DIR] [--aliases :a:b] [--env KEY=VALUE ...] up|status|check NS...|down
+
+State lives in <root>/.dev-loop/. The project root is --root (default: cwd), never
+this script's location. The library location IS this script's location.
+Uses the installed clj-nrepl-eval client, not a bencode copy.
+"""
+import argparse
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import uuid
+
+LIBRARY = Path(__file__).resolve().parent.parent
+RUNNER_NS = 'kaocha-sublime.runner'
+GENERATION_PROP = '-Ddev.loop.generation='
+ROOT_PROP = '-Ddev.loop.root='
+
+
+# ---------------------------------------------------------------- fingerprints
+
+def fingerprint(root):
+    h = hashlib.sha256()
+    files = [p for p in (root / 'deps.edn', root / 'tests.edn') if p.is_file()]
+    for folder in ('src', 'test', 'dev', 'resources'):
+        if (root / folder).is_dir():
+            files.extend(p for p in (root / folder).rglob('*') if p.is_file())
+    for p in sorted(files):
+        h.update(str(p.relative_to(root)).encode())
+        h.update(p.read_bytes())
+    return h.hexdigest()
+
+
+def environment_fingerprint(root):
+    """Anything that requires a JVM restart: the repo's deps/tests config and this library."""
+    h = hashlib.sha256()
+    for name in ('deps.edn', 'tests.edn'):
+        p = root / name
+        h.update(name.encode())
+        h.update(p.read_bytes() if p.is_file() else b'<absent>')
+    library_files = [LIBRARY / 'deps.edn', LIBRARY / 'bin' / 'sublime-loop',
+                     *(LIBRARY / 'src').rglob('*.clj')]
+    for p in sorted(library_files):
+        h.update(str(p.relative_to(LIBRARY)).encode())
+        h.update(p.read_bytes())
+    return h.hexdigest()
+
+
+# ---------------------------------------------------------------- liveness probes
+
+def probe_process(pid):
+    """Facts about pid from ps: exists, zombie, full command line."""
+    stat = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], text=True, capture_output=True)
+    state = stat.stdout.strip()
+    if not state:
+        return {'exists': False, 'zombie': False, 'command': ''}
+    command = subprocess.run(['ps', '-ww', '-p', str(pid), '-o', 'command='],
+                             text=True, capture_output=True).stdout.strip()
+    return {'exists': True, 'zombie': state.startswith('Z'), 'command': command}
+
+
+def port_listeners(port):
+    """PIDs LISTENing on TCP port. Raises when lsof itself is unavailable or errs."""
+    if not shutil.which('lsof'):
+        raise RuntimeError('lsof is required to prove nREPL port ownership')
+    result = subprocess.run(['lsof', '-nP', '-iTCP:' + str(port), '-sTCP:LISTEN', '-Fp'],
+                            text=True, capture_output=True)
+    if result.returncode not in (0, 1):
+        raise RuntimeError('lsof failed: ' + result.stderr.strip())
+    return {int(line[1:]) for line in result.stdout.splitlines() if line.startswith('p')}
+
+
+def classify(session, root, probe=probe_process, listeners=port_listeners):
+    """Decide whether a session record names a live runner, without trusting the record.
+
+    Returns {'state': 'live'|'stale', 'reason': str, 'owned': bool}. 'owned' means the
+    recorded pid is a live java whose command line carries this record's generation
+    marker: only an owned process may ever be signalled. 'live' additionally requires
+    that pid to own the recorded nREPL port; nREPL attestation happens afterwards.
+    """
+    pid, port, generation = session.get('pid'), session.get('port'), session.get('generation')
+    if not isinstance(pid, int) or not isinstance(port, int) or not generation:
+        return {'state': 'stale', 'reason': 'malformed-record', 'owned': False}
+    facts = probe(pid)
+    if not facts['exists'] or facts['zombie']:
+        return {'state': 'stale', 'reason': 'process-gone', 'owned': False}
+    command = facts['command']
+    is_java = re.search(r'(^|/)java(\s|$)', command) is not None
+    owned = is_java and (GENERATION_PROP + generation) in command
+    if not owned:
+        return {'state': 'stale', 'reason': 'pid-not-this-runner', 'owned': False}
+    if pid not in listeners(port):
+        return {'state': 'stale', 'reason': 'port-not-owned', 'owned': True}
+    return {'state': 'live', 'reason': 'owned-and-listening', 'owned': True}
+
+
+def utc_stamp():
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+
+
+def archive_session(run_dir, session_path, pid, clock=utc_stamp):
+    """Move the record to session.stale-<pid>-<UTC>.json; never overwrite, never delete."""
+    data = session_path.read_bytes()
+    base = 'session.stale-' + str(pid) + '-' + clock()
+    for n in range(1000):
+        candidate = run_dir / (base + ('' if n == 0 else '-' + str(n)) + '.json')
+        try:
+            with candidate.open('xb') as out:
+                out.write(data)
+                out.flush()
+                os.fsync(out.fileno())
+        except FileExistsError:
+            continue
+        session_path.unlink()
+        return candidate
+    raise RuntimeError('could not choose an unused archive name for ' + base)
+
+
+# ---------------------------------------------------------------- nREPL transport
+
+def read_transport(path, request_id):
+    receipt = json.loads(path.read_text())
+    if receipt.get('request-id') != request_id:
+        raise RuntimeError('terminal receipt request mismatch')
+    return receipt['value']
+
+
+class Loop:
+    def __init__(self, root, aliases, env):
+        self.root = root
+        self.aliases = aliases
+        self.env = env
+        self.run = root / '.dev-loop'
+        self.session_path = self.run / 'session.json'
+        self.taint = self.run / 'tainted'
+
+    def evaluate(self, session, expression, timeout=120):
+        # Nonce-bound receipt (curtaincall variant): a unique, atomically published
+        # file survives test stdout capture, and the request-id binds the result to
+        # this exact request, never a prior green.
+        request_id = str(uuid.uuid4())
+        response_path = self.run / ('transport-' + request_id + '.json')
+        temporary_path = response_path.with_suffix('.tmp')
+        code = ('(let [value ' + expression + '] '
+                '(spit ' + json.dumps(str(temporary_path)) +
+                ' (' + RUNNER_NS + '/write-json {:request-id ' + json.dumps(request_id) +
+                ' :value value})) '
+                '(java.nio.file.Files/move (.toPath (clojure.java.io/file ' +
+                json.dumps(str(temporary_path)) + ')) (.toPath (clojure.java.io/file ' +
+                json.dumps(str(response_path)) + ')) (into-array java.nio.file.CopyOption '
+                '[java.nio.file.StandardCopyOption/ATOMIC_MOVE])) '
+                '(println "DEV_LOOP_RESULT_SAVED"))')
+        try:
+            result = subprocess.run(['clj-nrepl-eval', '--port', str(session['port']),
+                                     '--timeout', str(timeout * 1000), code], cwd=self.root,
+                                    text=True, capture_output=True, timeout=timeout + 3)
+            detail = (result.stderr or result.stdout)[-1600:]
+        except subprocess.TimeoutExpired:
+            detail = 'clj-nrepl-eval timed out after ' + str(timeout + 3) + 's'
+        if response_path.exists():
+            return read_transport(response_path, request_id)
+        raise RuntimeError('nREPL returned no terminal receipt: ' + detail)
+
+    def attest(self, session):
+        actual = self.evaluate(session, RUNNER_NS + '/identity-data', timeout=5)
+        for key in ('root', 'pid', 'generation', 'role'):
+            if actual.get(key) != session.get(key):
+                raise RuntimeError('runtime identity mismatch: ' + key)
+        if actual['root'] != str(self.root) or actual['role'] != 'test-only':
+            raise RuntimeError('wrong worktree or runtime role')
+        return actual
+
+    def load_session(self):
+        """Return (session, stale_archive). A stale record is archived, never trusted."""
+        if not self.session_path.exists():
+            return None, None
+        session = json.loads(self.session_path.read_text())
+        verdict = classify(session, self.root)
+        if verdict['state'] == 'stale':
+            archive = archive_session(self.run, self.session_path, session.get('pid'))
+            if verdict['owned']:
+                # Our generation's JVM, alive but not serving its recorded port. It is
+                # proven ours, so stop it rather than orphan a heap.
+                self.terminate(session['pid'])
+            self.taint.unlink(missing_ok=True)
+            return None, {'path': str(archive), 'reason': verdict['reason']}
+        # Alive and owned: attest via nREPL. A hung runner errors here and keeps its record.
+        self.attest(session)
+        return session, None
+
+    def terminate(self, pid):
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            facts = probe_process(pid)
+            if not facts['exists'] or facts['zombie']:
+                return
+            time.sleep(.05)
+        raise RuntimeError('owned process has not stopped; session identity retained')
+
+    def boot(self):
+        session, stale = self.load_session()
+        if session is not None:
+            if self.taint.exists():
+                raise RuntimeError('test process tainted; run sublime-loop down then up')
+            return session, None
+        if not shutil.which('clj-nrepl-eval'):
+            raise RuntimeError('install clj-nrepl-eval before starting the runner')
+        generation = str(uuid.uuid4())
+        env = dict(os.environ, DEV_LOOP_GENERATION=generation)
+        env.update(self.env)
+        command = ['clojure', '-J-Xms64m', '-J-Xmx512m',
+                   '-J' + GENERATION_PROP + generation, '-J' + ROOT_PROP + str(self.root),
+                   '-M' + self.aliases]
+        with (self.run / 'boot.log').open('w') as log:
+            process = subprocess.Popen(command, cwd=self.root, env=env, stdout=log,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            if self.session_path.exists():
+                session = json.loads(self.session_path.read_text())
+                if session['generation'] != generation:
+                    raise RuntimeError('unexpected generation during startup')
+                self.attest(session)
+                session['environment'] = environment_fingerprint(self.root)
+                session['aliases'] = self.aliases
+                tmp = self.run / 'session.json.tmp'
+                tmp.write_text(json.dumps(session))
+                tmp.replace(self.session_path)
+                self.taint.unlink(missing_ok=True)
+                return session, stale
+            if process.poll() is not None:
+                raise RuntimeError('startup failed; see ' + str(self.run / 'boot.log'))
+            time.sleep(.1)
+        # This process group was created and is owned by this exact invocation.
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=10)
+        raise RuntimeError('startup exceeded 90 seconds; owned process stopped; see boot.log')
+
+    def command(self, command, names):
+        if command == 'up':
+            session, stale = self.boot()
+            receipt = dict(session, status='ready')
+            if stale:
+                receipt.update(stale_record=stale['path'], stale_reason=stale['reason'])
+            return receipt
+        session, stale = self.load_session()
+        if session is None:
+            if stale and command in ('status', 'down'):
+                return {'status': 'stopped', 'stale_record': stale['path'],
+                        'stale_reason': stale['reason']}
+            suffix = ' (stale record archived to ' + stale['path'] + ')' if stale else ''
+            raise RuntimeError('no owned test process; run sublime-loop up' + suffix)
+        if command == 'down':
+            self.terminate(session['pid'])
+            self.session_path.unlink()
+            self.taint.unlink(missing_ok=True)
+            return {'status': 'stopped', 'pid': session['pid']}
+        if command == 'status':
+            return dict(session, status='tainted' if self.taint.exists() else 'ready')
+        if command == 'check':
+            if not names or any(not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]*', n) for n in names):
+                raise RuntimeError('name explicit test namespaces: sublime-loop check project.core-test')
+            if self.taint.exists():
+                raise RuntimeError('test process tainted; restart the owned runner')
+            if session.get('environment') != environment_fingerprint(self.root):
+                raise RuntimeError('runner or dependencies changed; run sublime-loop down then up')
+            before = fingerprint(self.root)
+            self.taint.write_text('check in flight; terminal result not yet received\n')
+            receipt = self.evaluate(session, '(' + RUNNER_NS + '/check! ' + json.dumps(names) + ')')
+            after = fingerprint(self.root)
+            terminal = receipt.get('status') in ('pass', 'fail') and receipt.get('counts') is not None
+            if before != after:
+                receipt['status'] = 'stale'
+            if terminal:
+                self.taint.unlink()
+            else:
+                self.taint.write_text('probe did not establish a completed test result; restart owned runner\n')
+            receipt.update(source=before, generation=session['generation'],
+                           checks=names, verification_complete=False,
+                           proof_pending=['final candidate required gates'])
+            return receipt
+        raise RuntimeError('use up, status, check or down')
+
+
+def parse(argv):
+    parser = argparse.ArgumentParser(prog='sublime-loop')
+    parser.add_argument('--root', default='.', help='Clojure project root (has deps.edn)')
+    parser.add_argument('--aliases', default=':test:sublime',
+                        help='deps aliases for the runner JVM (default :test:sublime)')
+    parser.add_argument('--env', action='append', default=[], metavar='KEY=VALUE',
+                        help='extra runner env; {state_dir} expands to <root>/.dev-loop')
+    parser.add_argument('command', nargs='?', default='status')
+    parser.add_argument('names', nargs='*')
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse(sys.argv[1:] if argv is None else argv)
+    root = Path(args.root).resolve()
+    if not (root / 'deps.edn').is_file():
+        raise RuntimeError('not a Clojure project root (no deps.edn): ' + str(root))
+    if not args.aliases.startswith(':'):
+        raise RuntimeError('--aliases must look like :test:sublime')
+    env = {}
+    for item in args.env:
+        key, sep, value = item.partition('=')
+        if not sep or not key:
+            raise RuntimeError('--env expects KEY=VALUE: ' + item)
+        env[key] = value.replace('{state_dir}', str(root / '.dev-loop'))
+    loop = Loop(root, args.aliases, env)
+    loop.run.mkdir(exist_ok=True)
+    start = time.monotonic()
+    with (loop.run / 'lock').open('a') as lock:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() - start > 120:
+                    raise RuntimeError('runner busy for 120 seconds; existing owner retains the lock')
+                time.sleep(.05)
+        queue_s = time.monotonic() - start
+        names = [n for arg in args.names for n in arg.split(',') if n]
+        try:
+            receipt = loop.command(args.command, names)
+        except Exception as exc:
+            receipt = {'status': 'unknown', 'error': str(exc)}
+        receipt.update(schema='dev-loop.v1', root=str(root), wall_s=round(time.monotonic() - start, 4),
+                       queue_s=round(queue_s, 4))
+        receipt_path = loop.run / ('result-' + str(uuid.uuid4()) + '.json')
+        receipt['wrapper_receipt'] = str(receipt_path)
+        payload = json.dumps(receipt, indent=2) + '\n'
+        receipt_path.write_text(payload)
+        latest = loop.run / 'last-result.tmp'
+        latest.write_text(payload)
+        latest.replace(loop.run / 'last-result.json')
+        print(json.dumps(receipt))
+        if receipt['status'] == 'unknown':
+            return 2
+        return 0 if receipt['status'] in ('ready', 'stopped', 'pass') else 1
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(json.dumps({'schema': 'dev-loop.v1', 'status': 'unknown', 'error': str(exc)}))
+        sys.exit(2)

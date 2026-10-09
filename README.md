@@ -216,3 +216,50 @@ Agent process witnesses: `python3 scripts/agent_witnesses.py` and
 Each witness JVM uses `-Xms64m -Xmx512m`; raw results are retained under
 `evidence/agent-v1/`. These are correctness and absolute wall/byte measurements,
 not a matched speedup claim.
+
+## Warm runner (sublime-loop)
+
+`bin/sublime-loop` keeps one owned, test-only nREPL JVM per project root and
+checks named namespaces in it. Repos call it from here, through a
+`~/bin/sublime-loop` launcher or a `$(SUBLIME_LOOP)` make variable:
+
+```sh
+sublime-loop --root <dir> up            # boot (or attest) the runner
+sublime-loop --root <dir> check NS...   # reload the dependency closure, run NS
+sublime-loop --root <dir> status
+sublime-loop --root <dir> down
+```
+
+`--root` (default: the current directory) is the directory with `deps.edn`. All
+state lives in `<root>/.dev-loop/`. `--aliases` (default `:test:sublime`) names the
+runner's deps aliases; `--env KEY=VALUE` adds runner environment, where
+`{state_dir}` expands to `<root>/.dev-loop`. Every command prints one
+`dev-loop.v1` JSON receipt and writes it to `result-<uuid>.json` and
+`last-result.json`. Exit 0 = ready/stopped/pass, 1 = fail/stale/tainted, 2 = unknown.
+
+A repo's only per-repo parts are the alias and four Makefile lines:
+
+```clojure
+:sublime {:extra-deps {local/kaocha-sublime {:local/root "<path>/kaocha-sublime"}
+                       nrepl/nrepl {:mvn/version "1.3.1"}
+                       org.clojure/tools.namespace {:mvn/version "1.5.0"}}
+          :main-opts ["-m" "kaocha-sublime.runner"]}
+```
+
+```make
+sublime-up: ; $(SUBLIME_LOOP) --root . up
+sublime-status: ; $(SUBLIME_LOOP) --root . status
+sublime-check: ; $(SUBLIME_LOOP) --root . check $(NS)
+sublime-down: ; $(SUBLIME_LOOP) --root . down
+```
+
+A dead runner no longer wedges the loop. Before contacting nREPL, the CLI proves
+the recorded pid is a live java whose command line carries the record's generation
+and that it owns the recorded port (`lsof`). Otherwise the record is archived to
+`session.stale-<pid>-<UTC>.json` (never deleted or overwritten): `up` boots fresh,
+`status`/`down` report `stopped` with `stale_record`, and `check` asks for `up`.
+A process whose ownership is not proven is never signalled. A live, owned runner
+that does not answer nREPL is an error and keeps its record.
+
+Never vendor `bin/dev-loop` or `dev/feedback.clj` into a repo. Improvements land
+here, with tests: `python3 -m unittest discover -s test -p 'test_*.py' -v`.
