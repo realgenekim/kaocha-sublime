@@ -62,9 +62,38 @@
     (or (sequential? v) (set? v)) (str "[" (str/join "," (map write-json v)) "]")
     :else (json-string (str v))))
 
+(defn- local-roots
+  "Canonical dirs of the :local/root deps declared in `dir`'s deps.edn."
+  [^java.io.File dir]
+  (let [f (io/file dir "deps.edn")]
+    (when (.isFile f)
+      (->> (vals (:deps (edn/read-string (slurp f))))
+           (keep :local/root)
+           (map #(.getCanonicalFile (io/file dir %)))))))
+
+(defn local-root-source-dirs
+  "The :paths dirs of every :local/root dep reachable from `root`'s deps.edn, followed
+  transitively, excluding `root` itself. A sibling root edited by another checkout or
+  seat must reload too, or a test runs against the copy loaded when the JVM started."
+  [root]
+  (let [root (.getCanonicalFile (io/file root))]
+    (loop [pending (vec (local-roots root)) seen #{root} dirs []]
+      (if-let [dir (first pending)]
+        (if (seen dir)
+          (recur (subvec pending 1) seen dirs)
+          (let [f (io/file dir "deps.edn")
+                paths (or (when (.isFile f) (:paths (edn/read-string (slurp f)))) ["src"])]
+            (recur (into (subvec pending 1) (local-roots dir))
+                   (conj seen dir)
+                   (into dirs (map #(io/file dir %) paths)))))
+        dirs))))
+
 (defn- source-dirs []
   ;; Scan only directories that exist; a project without test/ must still check.
-  (filterv #(.isDirectory ^java.io.File %) [(io/file "src") (io/file "test")]))
+  (->> (concat [(io/file "src") (io/file "test")] (local-root-source-dirs "."))
+       (filter #(.isDirectory ^java.io.File %))
+       distinct
+       vec))
 
 (defn check!
   "Reload the declared dependency closure of the requested namespaces, then run
