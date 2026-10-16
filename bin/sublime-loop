@@ -4,7 +4,9 @@
 usage: sublime-loop [--root DIR] [--aliases :a:b] [--env KEY=VALUE ...] up|status|check NS...|down
 
 State lives in <root>/.dev-loop/. The project root is --root (default: cwd), never
-this script's location. The library location IS this script's location.
+this script's location. The library location IS this script's location, and the
+script injects it into the runner JVM itself (-Sdeps alias :kaocha-sublime/library,
+appended last), so a repo alias never names this library's path and worktrees work.
 Uses the installed clj-nrepl-eval client, not a bencode copy.
 """
 import argparse
@@ -26,6 +28,35 @@ LIBRARY = Path(__file__).resolve().parent.parent
 RUNNER_NS = 'kaocha-sublime.runner'
 GENERATION_PROP = '-Ddev.loop.generation='
 ROOT_PROP = '-Ddev.loop.root='
+LIBRARY_ALIAS = ':kaocha-sublime/library'
+# What kaocha-sublime.runner needs beyond the library's own deps.edn (Clojure, Kaocha).
+# Pinned here, in a fingerprinted file, so a version change forces a JVM restart.
+RUNNER_DEPS = (('nrepl/nrepl', '1.3.1'), ('org.clojure/tools.namespace', '1.5.0'))
+
+
+# ---------------------------------------------------------------- launch command
+
+def library_sdeps(library=LIBRARY):
+    """EDN for -Sdeps: one alias that adds THIS library (absolute path), the runner's
+    deps, and the runner main. Appended last to -M so its :main-opts win and its
+    local/kaocha-sublime coordinate overrides any relative one in a repo alias."""
+    deps = ' '.join(name + ' {:mvn/version ' + json.dumps(version) + '}'
+                    for name, version in RUNNER_DEPS)
+    return ('{:aliases {' + LIBRARY_ALIAS + ' {:extra-deps {local/kaocha-sublime {:local/root ' +
+            json.dumps(str(library)) + '} ' + deps + '} :main-opts ["-m" "' + RUNNER_NS + '"]}}}')
+
+
+def runner_command(root, aliases, generation, library=LIBRARY):
+    return ['clojure', '-Sdeps', library_sdeps(library), '-J-Xms64m', '-J-Xmx512m',
+            '-J' + GENERATION_PROP + generation, '-J' + ROOT_PROP + str(root),
+            '-M' + aliases + LIBRARY_ALIAS]
+
+
+def default_aliases(root):
+    """:test, plus the repo's optional :sublime alias (project extras) when deps.edn
+    defines one. A textual check: an alias key at the start of a line."""
+    text = (root / 'deps.edn').read_text() if (root / 'deps.edn').is_file() else ''
+    return ':test:sublime' if re.search(r'(?m)^[\s{]*:sublime[\s{]', text) else ':test'
 
 
 # ---------------------------------------------------------------- fingerprints
@@ -137,9 +168,10 @@ def read_transport(path, request_id):
 
 
 class Loop:
-    def __init__(self, root, aliases, env):
+    def __init__(self, root, aliases, env, explicit_aliases=False):
         self.root = root
         self.aliases = aliases
+        self.explicit_aliases = explicit_aliases
         self.env = env
         self.run = root / '.dev-loop'
         self.session_path = self.run / 'session.json'
@@ -220,9 +252,7 @@ class Loop:
         generation = str(uuid.uuid4())
         env = dict(os.environ, DEV_LOOP_GENERATION=generation)
         env.update(self.env)
-        command = ['clojure', '-J-Xms64m', '-J-Xmx512m',
-                   '-J' + GENERATION_PROP + generation, '-J' + ROOT_PROP + str(self.root),
-                   '-M' + self.aliases]
+        command = runner_command(self.root, self.aliases, generation)
         with (self.run / 'boot.log').open('w') as log:
             process = subprocess.Popen(command, cwd=self.root, env=env, stdout=log,
                                        stderr=subprocess.STDOUT, start_new_session=True)
@@ -276,6 +306,10 @@ class Loop:
                 raise RuntimeError('test process tainted; restart the owned runner')
             if session.get('environment') != environment_fingerprint(self.root):
                 raise RuntimeError('runner or dependencies changed; run sublime-loop down then up')
+            if self.explicit_aliases and session.get('aliases') != self.aliases:
+                raise RuntimeError('runner or dependencies changed (aliases ' +
+                                   str(session.get('aliases')) + ' -> ' + self.aliases +
+                                   '); run sublime-loop down then up')
             before = fingerprint(self.root)
             self.taint.write_text('check in flight; terminal result not yet received\n')
             receipt = self.evaluate(session, '(' + RUNNER_NS + '/check! ' + json.dumps(names) + ')')
@@ -297,8 +331,9 @@ class Loop:
 def parse(argv):
     parser = argparse.ArgumentParser(prog='sublime-loop')
     parser.add_argument('--root', default='.', help='Clojure project root (has deps.edn)')
-    parser.add_argument('--aliases', default=':test:sublime',
-                        help='deps aliases for the runner JVM (default :test:sublime)')
+    parser.add_argument('--aliases', default=None,
+                        help='deps aliases for the runner JVM (default :test, plus :sublime '
+                             'when deps.edn defines it); the library alias is always appended')
     parser.add_argument('--env', action='append', default=[], metavar='KEY=VALUE',
                         help='extra runner env; {state_dir} expands to <root>/.dev-loop')
     parser.add_argument('command', nargs='?', default='status')
@@ -311,15 +346,17 @@ def main(argv=None):
     root = Path(args.root).resolve()
     if not (root / 'deps.edn').is_file():
         raise RuntimeError('not a Clojure project root (no deps.edn): ' + str(root))
-    if not args.aliases.startswith(':'):
-        raise RuntimeError('--aliases must look like :test:sublime')
+    explicit = args.aliases is not None
+    aliases = args.aliases if explicit else default_aliases(root)
+    if not re.fullmatch(r'(:[A-Za-z0-9_.*+!?<>=/-]+)+', aliases):
+        raise RuntimeError('--aliases must look like :test:dev')
     env = {}
     for item in args.env:
         key, sep, value = item.partition('=')
         if not sep or not key:
             raise RuntimeError('--env expects KEY=VALUE: ' + item)
         env[key] = value.replace('{state_dir}', str(root / '.dev-loop'))
-    loop = Loop(root, args.aliases, env)
+    loop = Loop(root, aliases, env, explicit)
     loop.run.mkdir(exist_ok=True)
     start = time.monotonic()
     with (loop.run / 'lock').open('a') as lock:

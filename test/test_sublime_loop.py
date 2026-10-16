@@ -209,5 +209,27 @@ class FingerprintTest(Workspace):
         self.assertNotEqual(before, cli.environment_fingerprint(self.root))
 
 
+class LaunchCommandTest(Workspace):
+    def test_library_alias_is_injected_last_with_absolute_library_path(self):
+        command = cli.runner_command(self.root, ':test:dev', GEN)
+        self.assertEqual('-M:test:dev' + cli.LIBRARY_ALIAS, command[-1])
+        sdeps = command[command.index('-Sdeps') + 1]
+        self.assertIn('{:local/root ' + json.dumps(str(cli.LIBRARY)) + '}', sdeps)
+        self.assertTrue(cli.LIBRARY.is_absolute())
+        self.assertIn('"-m" "kaocha-sublime.runner"', sdeps)
+        for name, _ in cli.RUNNER_DEPS:
+            self.assertIn(name, sdeps)
+        self.assertIn('-J' + cli.GENERATION_PROP + GEN, command)
+
+    def test_default_aliases_add_optional_repo_sublime_alias(self):
+        self.assertEqual(':test', cli.default_aliases(self.root))
+        (self.root / 'deps.edn').write_text('{:aliases\n {:test {}\n  :sublime {:extra-paths ["dev"]}}}')
+        self.assertEqual(':test:sublime', cli.default_aliases(self.root))
+
+    def test_malformed_aliases_are_refused(self):
+        with self.assertRaisesRegex(RuntimeError, '--aliases'):
+            cli.main(['--root', str(self.root), '--aliases', 'test', 'status'])
+
+
 if __name__ == '__main__':
     unittest.main()

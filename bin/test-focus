@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# test-focus -- run named test namespaces in the warm JVM for this project root.
+#
+#   test-focus my.app.core-test my.app.db-test
+#   test-focus --root server2 --aliases :run-tests:dev:test server2.handlers.discover-test
+#
+# Thin wrapper over sublime-loop check. When no warm JVM is up, it is tainted, or its
+# dependencies/runner/aliases changed, it says so LOUDLY on stderr ("COLD START"), starts
+# or restarts the warm JVM, and then runs the check. Every cold start is visible: one per
+# session is the cost of doing business; more than one means the inner loop is being paid
+# for cold. Exit code is the check's: 0 pass, 1 fail/stale/tainted, 2 unknown.
+# Pass the same --root/--aliases you gave warm-jvm. Docs: docs/SETUP.md in this library.
+set -euo pipefail
+LOOP="$(cd "$(dirname "$0")" && pwd)/sublime-loop"
+flags=(); names=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root|--aliases|--env)
+      [ $# -ge 2 ] || { echo "test-focus: $1 needs a value" >&2; exit 2; }
+      flags+=("$1" "$2"); shift 2 ;;
+    *) names+=("$1"); shift ;;
+  esac
+done
+[ ${#names[@]} -gt 0 ] || { echo "test-focus: name at least one test namespace" >&2; exit 2; }
+cold() { echo "test-focus: COLD START -- $1; starting the warm JVM (sublime-loop up)" >&2; }
+# Start/restart receipts go to stderr so stdout carries exactly one receipt: the check's.
+up() { "$LOOP" ${flags[@]+"${flags[@]}"} up >&2; }
+down() { "$LOOP" ${flags[@]+"${flags[@]}"} down >&2 || true; }
+status="$("$LOOP" ${flags[@]+"${flags[@]}"} status 2>/dev/null || true)"
+case "$status" in
+  *'"status": "ready"'*) ;;
+  *'"status": "tainted"'*) cold "warm JVM tainted"; down; up ;;
+  *) cold "no warm JVM for this root"; up ;;
+esac
+out="$("$LOOP" ${flags[@]+"${flags[@]}"} check "${names[@]}")" && rc=0 || rc=$?
+case "$out" in
+  *'runner or dependencies changed'*)
+    cold "dependencies, runner or aliases changed"
+    down; up
+    out="$("$LOOP" ${flags[@]+"${flags[@]}"} check "${names[@]}")" && rc=0 || rc=$? ;;
+esac
+printf '%s\n' "$out"
+exit "$rc"

@@ -1,5 +1,8 @@
 # kaocha-sublime
 
+**Adopting the warm test loop (`warm-jvm`, `test-focus`) in a repo or worktree:
+see [docs/SETUP.md](docs/SETUP.md).**
+
 Experimental plugins for **Kaocha 1.91.1392**, Clojure 1.12, Java 17+:
 atomic run receipts, conservative affected namespace selection, and an agent reporter
 with content-bound status. Exact agent image attestation currently requires Linux
@@ -231,20 +234,18 @@ sublime-loop --root <dir> down
 ```
 
 `--root` (default: the current directory) is the directory with `deps.edn`. All
-state lives in `<root>/.dev-loop/`. `--aliases` (default `:test:sublime`) names the
-runner's deps aliases; `--env KEY=VALUE` adds runner environment, where
+state lives in `<root>/.dev-loop/`. `--aliases` (default `:test`, plus `:sublime`
+when the repo defines it) names the project's deps aliases; the script always appends
+its own `-Sdeps` alias `:kaocha-sublime/library` (this checkout by absolute path,
+nrepl, tools.namespace, `-m kaocha-sublime.runner`), so no repo alias names the library; `--env KEY=VALUE` adds runner environment, where
 `{state_dir}` expands to `<root>/.dev-loop`. Every command prints one
 `dev-loop.v1` JSON receipt and writes it to `result-<uuid>.json` and
 `last-result.json`. Exit 0 = ready/stopped/pass, 1 = fail/stale/tainted, 2 = unknown.
 
-A repo's only per-repo parts are the alias and four Makefile lines:
-
-```clojure
-:sublime {:extra-deps {local/kaocha-sublime {:local/root "<path>/kaocha-sublime"}
-                       nrepl/nrepl {:mvn/version "1.3.1"}
-                       org.clojure/tools.namespace {:mvn/version "1.5.0"}}
-          :main-opts ["-m" "kaocha-sublime.runner"]}
-```
+A repo needs no alias for the library. An optional `:sublime` alias carries only
+project extras (for example `:extra-paths ["dev"]`); see docs/SETUP.md. `bin/warm-jvm`
+(= `up`) and `bin/test-focus` (= `check`, with a loud `COLD START` restart) wrap the
+CLI. Optional Makefile lines:
 
 ```make
 sublime-up: ; $(SUBLIME_LOOP) --root . up

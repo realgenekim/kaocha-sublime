@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# warm-jvm -- start (or confirm) the one owned, test-only warm JVM for a Clojure project root.
+# The first action of any Clojure code session, in the checkout you are editing: a worktree
+# needs its own JVM, because a JVM started in another checkout runs that checkout's code.
+#
+#   warm-jvm                                        # root = cwd; aliases :test (+ :sublime if defined)
+#   warm-jvm --root server2 --aliases :run-tests:dev:test
+#
+# Thin wrapper over sublime-loop up (same flags). The library itself (this checkout) is
+# injected by sublime-loop, so the repo needs no alias naming it. Idempotent: a live
+# session is reused. Run it in the background; the JSON receipt says ready, with the
+# port and generation. Docs: docs/SETUP.md in this library.
+set -euo pipefail
+exec "$(cd "$(dirname "$0")" && pwd)/sublime-loop" "$@" up
