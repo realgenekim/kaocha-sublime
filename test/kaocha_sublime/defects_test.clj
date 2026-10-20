@@ -391,10 +391,14 @@
   (let [dir (temp-dir) cfg (skip-fixture dir)
         file (str dir "/test/fail_fast_scope_test.clj")]
     (io/delete-file (str dir "/test/declared_gate_test.clj"))
-    (spit file "(ns fail-fast-scope-test (:require [clojure.test :refer [deftest is]]))\n(deftest first-red (is false))\n(deftest later (is true))\n")
+    ;; Both tests are red so the scenario holds under every order. The default
+    ;; randomize plugin shuffles vars per seed; with one red and one green test,
+    ;; a seed that ran the green test first left nothing to omit (red ~50%).
+    (spit file "(ns fail-fast-scope-test (:require [clojure.test :refer [deftest is]]))\n(deftest red-a (is false))\n(deftest red-b (is false))\n")
     (let [answer (probe-run '[fail-fast-scope-test] (assoc cfg :kaocha/fail-fast? true))
           r (candidate/read-edn (:path answer))]
       (is (= 1 (:exit answer)))
+      (is (= 1 (get-in r [:totals :fail])) "Fail-fast stopped after the first red test")
       (is (= :partial (:coverage r)))
       (is (= 0 (get-in r [:totals :skipped])))
       (is (= 0 (get-in r [:totals :skipped-by-focus])))
