@@ -186,6 +186,13 @@ $KS/bin/test-focus --root server2 --aliases :run-tests:dev:test \
   in `src/` and `test/`), then runs exactly those namespaces through Kaocha.
 - stdout is exactly one JSON receipt. Exit code: `0` pass, `1` fail/stale/tainted,
   `2` unknown.
+- A failing receipt carries `failures`: the first three failing tests, each with `test`,
+  `at` (`file:line`), `expr`, `expected`, `actual` and `context`. No need to open the
+  `events` file for the common case.
+- `--root` resolves the same from anywhere in the checkout: as given (against the working
+  directory), else against the git toplevel. `--root server2` works from the top, from
+  inside `server2/` and from a sibling. A root that resolves nowhere is refused with exit 2,
+  the paths tried, and no JVM started (never a COLD START).
 - The first check in a fresh JVM loads Kaocha and your code (10-20 s). Later checks
   take seconds.
 

@@ -231,5 +231,106 @@ class LaunchCommandTest(Workspace):
             cli.main(['--root', str(self.root), '--aliases', 'test', 'status'])
 
 
+def git_repo_with_project(base, name='proj'):
+    """A git repository at `base` holding the Clojure project `<base>/<name>`."""
+    subprocess.run(['git', 'init', '-q', str(base)], check=True)
+    project = base / name
+    project.mkdir()
+    (project / 'deps.edn').write_text('{}')
+    return project
+
+
+class RootResolutionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name).resolve()
+        self.project = git_repo_with_project(self.base)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_relative_root_resolves_from_the_checkout_top(self):
+        self.assertEqual(self.project, cli.resolve_root('proj', self.base))
+
+    def test_relative_root_resolves_from_inside_the_project_itself(self):
+        # 2026-10-20: `--root reddit-scraper` run from inside reddit-scraper/ resolved
+        # reddit-scraper/reddit-scraper and failed.
+        self.assertEqual(self.project, cli.resolve_root('proj', self.project))
+
+    def test_relative_root_resolves_from_a_sibling_directory(self):
+        other = self.base / 'other'
+        other.mkdir()
+        self.assertEqual(self.project, cli.resolve_root('proj', other))
+
+    def test_dot_and_absolute_roots_are_taken_as_given(self):
+        self.assertEqual(self.project, cli.resolve_root('.', self.project))
+        self.assertEqual(self.project, cli.resolve_root(str(self.project), self.base))
+
+    def test_unknown_root_names_every_path_tried(self):
+        with self.assertRaisesRegex(RuntimeError, 'not a Clojure project root') as caught:
+            cli.resolve_root('nope', self.project)
+        self.assertIn(str(self.project / 'nope'), str(caught.exception))
+        self.assertIn(str(self.base / 'nope'), str(caught.exception))
+
+    def test_outside_git_only_the_working_directory_counts(self):
+        with tempfile.TemporaryDirectory() as plain:
+            plain = Path(plain).resolve()
+            (plain / 'deps.edn').write_text('{}')
+            self.assertEqual(plain, cli.resolve_root('.', plain))
+            with self.assertRaisesRegex(RuntimeError, 'not a Clojure project root'):
+                cli.resolve_root('proj', plain)
+
+
+class FailureSummaryTest(Workspace):
+    def events(self, *lines):
+        path = self.run_dir / 'run.events'
+        path.write_text('\n'.join(lines) + '\n')
+        return path
+
+    def event(self, line_kind, **fields):
+        return line_kind + ' ' + json.dumps(fields)
+
+    def test_first_failures_are_lifted_with_their_location_and_values(self):
+        path = self.events(
+            self.event('RUN-START', v=1),
+            self.event('FAIL', kind='fail', test='a.core-test/adds', file='test/a/core_test.clj', line=12,
+                       expr='(= 3 (add 1 1))', expected='(= 3 (add 1 1))', actual='(not (= 3 2))',
+                       context='small numbers'),
+            self.event('FAIL', kind='error', test='a.core-test/reads', file='test/a/core_test.clj', line=20,
+                       expr='(read! x)', actual='java.lang.NullPointerException: x is null', context=''),
+            self.event('RUN-DONE', fail=1, error=1))
+        failures = cli.failure_summary(path)
+        self.assertEqual(2, len(failures))
+        self.assertEqual({'kind': 'fail', 'test': 'a.core-test/adds', 'at': 'test/a/core_test.clj:12',
+                          'expr': '(= 3 (add 1 1))', 'expected': '(= 3 (add 1 1))',
+                          'actual': '(not (= 3 2))', 'context': 'small numbers'}, failures[0])
+        self.assertEqual('a.core-test/reads', failures[1]['test'])
+        self.assertNotIn('context', failures[1], 'blank fields are left out')
+
+    def test_the_summary_is_bounded(self):
+        lines = [self.event('FAIL', kind='fail', test='t/n' + str(i), actual='x' * 5000) for i in range(9)]
+        failures = cli.failure_summary(self.events(*lines))
+        self.assertEqual(cli.FAILURE_LIMIT, len(failures))
+        self.assertLessEqual(len(failures[0]['actual']), cli.FIELD_LIMIT + 1)
+
+    def test_missing_or_unreadable_events_give_no_summary(self):
+        self.assertEqual([], cli.failure_summary(self.run_dir / 'absent.events'))
+        self.assertEqual([], cli.failure_summary(None))
+        self.assertEqual([], cli.failure_summary(self.events('FAIL {not json')))
+
+
+class TestFocusRootTest(unittest.TestCase):
+    def test_a_wrong_root_is_refused_without_a_cold_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            git_repo_with_project(base)
+            done = subprocess.run([str(SCRIPT.parent / 'test-focus'), '--root', 'nope', 'a.core-test'],
+                                  cwd=base, capture_output=True, text=True, timeout=60)
+            self.assertEqual(2, done.returncode)
+            self.assertNotIn('COLD START', done.stderr)
+            self.assertIn('not a Clojure project root', done.stdout)
+            self.assertFalse((base / 'nope').exists())
+
+
 if __name__ == '__main__':
     unittest.main()

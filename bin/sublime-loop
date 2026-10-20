@@ -4,7 +4,8 @@
 usage: sublime-loop [--root DIR] [--aliases :a:b] [--env KEY=VALUE ...] up|status|check NS...|down
 
 State lives in <root>/.dev-loop/. The project root is --root (default: cwd), never
-this script's location. The library location IS this script's location, and the
+this script's location. A relative --root resolves the same from anywhere in a git
+checkout: against the working directory, then its git toplevel (resolve_root). The library location IS this script's location, and the
 script injects it into the runner JVM itself (-Sdeps alias :kaocha-sublime/library,
 appended last), so a repo alias never names this library's path and worktrees work.
 Uses the installed clj-nrepl-eval client, not a bencode copy.
@@ -89,6 +90,72 @@ def environment_fingerprint(root):
 
 
 # ---------------------------------------------------------------- liveness probes
+
+def git_toplevel(cwd):
+    """The git checkout top of `cwd`, or None outside git."""
+    try:
+        done = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--show-toplevel'],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return Path(done.stdout.strip()).resolve() if done.returncode == 0 and done.stdout.strip() else None
+
+
+def resolve_root(arg, cwd):
+    """The project root named by --root: as given (absolute, or against `cwd`), else, for a
+    relative name, against the git toplevel of `cwd`. The first with a deps.edn wins, so
+    `--root server2` means the same checkout directory from the top, from inside server2/ and
+    from a sibling. Raises naming every path tried."""
+    given = Path(arg)
+    tried = [(cwd / given).resolve()]
+    top = None if given.is_absolute() else git_toplevel(cwd)
+    if top is not None:
+        tried.append((top / given).resolve())
+    for candidate in dict.fromkeys(tried):
+        if (candidate / 'deps.edn').is_file():
+            return candidate
+    raise RuntimeError('not a Clojure project root (no deps.edn): --root ' + str(arg) + '; tried ' +
+                       ', '.join(str(c) for c in dict.fromkeys(tried)))
+
+
+FAILURE_LIMIT = 3
+FIELD_LIMIT = 600
+FAILURE_FIELDS = ('kind', 'test', 'expr', 'expected', 'actual', 'context')
+
+
+def failure_summary(events_path, limit=FAILURE_LIMIT):
+    """The first `limit` failures and errors of a check, from its events file (lines
+    'FAIL {json}'), so the receipt shows what broke: test, file:line, expression, expected,
+    actual and context. Long values are cut at FIELD_LIMIT. [] when there is nothing to read."""
+    if not events_path:
+        return []
+    try:
+        lines = Path(events_path).read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        kind, _, payload = line.partition(' ')
+        if kind not in ('FAIL', 'ERROR'):
+            continue
+        try:
+            event = json.loads(payload)
+        except ValueError:
+            continue
+        item = {}
+        for key in FAILURE_FIELDS:
+            value = event.get(key)
+            if value in (None, '', []):
+                continue
+            value = value if isinstance(value, str) else json.dumps(value)
+            item[key] = value if len(value) <= FIELD_LIMIT else value[:FIELD_LIMIT] + '…'
+            if key == 'test' and event.get('file'):
+                item['at'] = event['file'] + (':' + str(event['line']) if event.get('line') else '')
+        out.append({k: item[k] for k in ('kind', 'test', 'at', 'expr', 'expected', 'actual', 'context') if k in item})
+        if len(out) >= limit:
+            break
+    return out
+
 
 def probe_process(pid):
     """Facts about pid from ps: exists, zombie, full command line."""
@@ -321,6 +388,9 @@ class Loop:
                 self.taint.unlink()
             else:
                 self.taint.write_text('probe did not establish a completed test result; restart owned runner\n')
+            failures = failure_summary(receipt.get('events'))
+            if failures:
+                receipt['failures'] = failures
             receipt.update(source=before, generation=session['generation'],
                            checks=names, verification_complete=False,
                            proof_pending=['final candidate required gates'])
@@ -343,9 +413,7 @@ def parse(argv):
 
 def main(argv=None):
     args = parse(sys.argv[1:] if argv is None else argv)
-    root = Path(args.root).resolve()
-    if not (root / 'deps.edn').is_file():
-        raise RuntimeError('not a Clojure project root (no deps.edn): ' + str(root))
+    root = resolve_root(args.root, Path.cwd())
     explicit = args.aliases is not None
     aliases = args.aliases if explicit else default_aliases(root)
     if not re.fullmatch(r'(:[A-Za-z0-9_.*+!?<>=/-]+)+', aliases):

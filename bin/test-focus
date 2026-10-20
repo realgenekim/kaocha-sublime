@@ -8,7 +8,10 @@
 # dependencies/runner/aliases changed, it says so LOUDLY on stderr ("COLD START"), starts
 # or restarts the warm JVM, and then runs the check. Every cold start is visible: one per
 # session is the cost of doing business; more than one means the inner loop is being paid
-# for cold. Exit code is the check's: 0 pass, 1 fail/stale/tainted, 2 unknown.
+# for cold. A wrong --root is refused (exit 2) before any JVM starts; a relative --root
+# resolves from anywhere in the checkout. A failing check's receipt carries "failures": the
+# first few failing tests with file:line, expression, expected and actual.
+# Exit code is the check's: 0 pass, 1 fail/stale/tainted, 2 unknown.
 # Pass the same --root/--aliases you gave warm-jvm. Docs: docs/SETUP.md in this library.
 set -euo pipefail
 LOOP="$(cd "$(dirname "$0")" && pwd)/sublime-loop"
@@ -27,6 +30,12 @@ cold() { echo "test-focus: COLD START -- $1; starting the warm JVM (sublime-loop
 up() { "$LOOP" ${flags[@]+"${flags[@]}"} up >&2; }
 down() { "$LOOP" ${flags[@]+"${flags[@]}"} down >&2 || true; }
 status="$("$LOOP" ${flags[@]+"${flags[@]}"} status 2>/dev/null || true)"
+# A wrong --root is a usage error, never a cold start: say so and spend no JVM.
+case "$status" in
+  *'not a Clojure project root'*)
+    echo "test-focus: wrong --root (no JVM started); see the receipt for the paths tried" >&2
+    printf '%s\n' "$status"; exit 2 ;;
+esac
 case "$status" in
   *'"status": "ready"'*) ;;
   *'"status": "tainted"'*) cold "warm JVM tainted"; down; up ;;
