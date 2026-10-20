@@ -11,7 +11,10 @@
             [lambdaisland.tools.namespace.dir :as ns-dir])
   (:import (java.nio.file Files)))
 
-(defn temp-dir [] (str (Files/createTempDirectory "kaocha-sublime-" (make-array java.nio.file.attribute.FileAttribute 0))))
+;; The real path: on macOS java.io.tmpdir is under /var, a symlink to /private/var, and the code
+;; under test reports canonical paths (ks-1kd).
+(defn temp-dir [] (str (.toRealPath (Files/createTempDirectory "kaocha-sublime-" (make-array java.nio.file.attribute.FileAttribute 0))
+                                    (make-array java.nio.file.LinkOption 0))))
 (defn fixture-config [dir]
   (config/merge-config (config/load-config nil)
     {:kaocha/tests [{:kaocha.testable/id :unit
