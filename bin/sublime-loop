@@ -308,11 +308,20 @@ class Loop:
             time.sleep(.05)
         raise RuntimeError('owned process has not stopped; session identity retained')
 
+    def require_aliases(self, session):
+        # A live session started with other aliases runs another classpath; refuse
+        # rather than certify it as ready or test on it.
+        if self.explicit_aliases and session.get('aliases') != self.aliases:
+            raise RuntimeError('runner or dependencies changed (aliases ' +
+                               str(session.get('aliases')) + ' -> ' + self.aliases +
+                               '); run sublime-loop down then up')
+
     def boot(self):
         session, stale = self.load_session()
         if session is not None:
             if self.taint.exists():
                 raise RuntimeError('test process tainted; run sublime-loop down then up')
+            self.require_aliases(session)
             return session, None
         if not shutil.which('clj-nrepl-eval'):
             raise RuntimeError('install clj-nrepl-eval before starting the runner')
@@ -373,10 +382,7 @@ class Loop:
                 raise RuntimeError('test process tainted; restart the owned runner')
             if session.get('environment') != environment_fingerprint(self.root):
                 raise RuntimeError('runner or dependencies changed; run sublime-loop down then up')
-            if self.explicit_aliases and session.get('aliases') != self.aliases:
-                raise RuntimeError('runner or dependencies changed (aliases ' +
-                                   str(session.get('aliases')) + ' -> ' + self.aliases +
-                                   '); run sublime-loop down then up')
+            self.require_aliases(session)
             before = fingerprint(self.root)
             self.taint.write_text('check in flight; terminal result not yet received\n')
             receipt = self.evaluate(session, '(' + RUNNER_NS + '/check! ' + json.dumps(names) + ')')

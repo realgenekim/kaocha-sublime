@@ -334,3 +334,25 @@ class TestFocusRootTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class UpAliasTest(Workspace):
+    """`up` must not report ready for a live session started with other aliases."""
+
+    def loop(self, aliases, explicit):
+        loop = cli.Loop(self.root, aliases, {}, explicit)
+        live = dict(record(self.root, os.getpid()), aliases=':test')
+        loop.load_session = lambda: (live, None)
+        return loop
+
+    def test_up_refuses_a_live_session_with_different_explicit_aliases(self):
+        with self.assertRaisesRegex(RuntimeError, r'aliases :test -> :standalone:test.*down then up'):
+            self.loop(':standalone:test', True).command('up', [])
+
+    def test_up_reuses_a_live_session_with_matching_aliases(self):
+        receipt = self.loop(':test', True).command('up', [])
+        self.assertEqual('ready', receipt['status'])
+
+    def test_up_without_explicit_aliases_reuses_the_live_session(self):
+        receipt = self.loop(':test', False).command('up', [])
+        self.assertEqual('ready', receipt['status'])
