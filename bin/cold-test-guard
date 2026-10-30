@@ -15,10 +15,13 @@ def decide(cmd: str):
     if re.search(r'\b(test-focus|warm-jvm|sublime-loop)\b', cmd):
         return None
     clj = re.search(r'\b(clj|clojure)\b[^;&|]*-[MX]:[\w:.-]*test', cmd)
-    kaocha = re.search(r'\b(bin/kaocha|kaocha)\b', cmd)
+    # kaocha only as the command word (bin/kaocha, ./bin/kaocha, kaocha), never as part of a path like kaocha-sublime
+    kaocha = re.search(r'(^|[;&|(]\s*|\s)(\S*/)?kaocha(?=\s|$)', cmd)
     if not (clj or kaocha):
         return None
-    focused = re.search(r'(--focus\b|\s-n\s|\s-v\s|--namespace\b|--var\b|run-tests|test-vars?\b|:nses?\b|:vars?\b)', cmd)
+    m = clj or kaocha
+    seg = re.split(r'\|\||&&|[|;]', cmd[m.start():])[0]
+    focused = re.search(r'(--focus\b|\s-n\s|\s-v\s|--namespace\b|--var\b|run-tests|test-vars?\b|:nses?\b|:vars?\b)', seg)
     if not focused:
         return None
     return ("Cold focused Clojure test run blocked (fresh JVM ~16 s per check). Use the warm loop: "
