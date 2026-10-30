@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""cold-test-guard — Claude Code PreToolUse(Bash) hook.
+
+Denies FOCUSED cold Clojure test runs (a fresh JVM for one namespace/var: the inner loop) and points
+the agent at the warm loop instead: `warm-jvm --root <dir>` once, then `test-focus <ns...>` (~1-2 s).
+Full-suite gates (`make test`, `make runtests-once`, plain `clojure -M:test` with no focus) are allowed:
+the full suite is the trailing background check and may run cold. Override: prefix `COLD_OK=1`.
+Reads the hook JSON on stdin; prints a deny decision or nothing. Never fails the tool call on error.
+"""
+import json, re, sys
+
+def decide(cmd: str):
+    if not cmd or re.search(r'(^|[;&|]\s*|\s)COLD_OK=1\b', cmd):
+        return None
+    if re.search(r'\b(test-focus|warm-jvm|sublime-loop)\b', cmd):
+        return None
+    clj = re.search(r'\b(clj|clojure)\b[^;&|]*-[MX]:[\w:.-]*test', cmd)
+    kaocha = re.search(r'\b(bin/kaocha|kaocha)\b', cmd)
+    if not (clj or kaocha):
+        return None
+    focused = re.search(r'(--focus\b|\s-n\s|\s-v\s|--namespace\b|--var\b|run-tests|test-vars?\b|:nses?\b|:vars?\b)', cmd)
+    if not focused:
+        return None
+    return ("Cold focused Clojure test run blocked (fresh JVM ~16 s per check). Use the warm loop: "
+            "`~/src.local/kaocha-sublime/bin/warm-jvm --root <project-root>` once, then "
+            "`~/src.local/kaocha-sublime/bin/test-focus --root <project-root> <test-ns> ...` (~1-2 s), "
+            "or `make t NS=...` where the repo has it. Full-suite gates are allowed. "
+            "If a cold run is genuinely intended, prefix the command with COLD_OK=1.")
+
+def main():
+    try:
+        data = json.load(sys.stdin)
+        reason = decide((data.get("tool_input") or {}).get("command", ""))
+    except Exception:
+        return 0
+    if reason:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                 "permissionDecision": "deny",
+                                                 "permissionDecisionReason": reason}}))
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
