@@ -372,6 +372,72 @@ When a coordinating session (the "main loop") hands test-backed work to agents, 
 9. **Per-var focus (`ns/var`) while iterating;** name the namespaces for the final check. The full-suite gate belongs to the coordinator (sequential, in the background) or CI, never to an agent.
 10. **The coordinator runs `sublime-loop down` at the end** and confirms the PID is gone.
 
+## 14. Pitfalls and recipes
+
+Field-tested on a Clojure/Swing app over one day: about 15 agents, one warm JVM, a laptop often at load 40-120. Each item is a problem that cost real time, with the fix to copy.
+
+### Test-only JVM flags belong in the alias the warm JVM uses
+
+If tests touch user state (a session file, a log under `$HOME`), redirect it with a JVM property set in the test alias, and add a test that fails if the test JVM points at the real path. Tests that drive the app's real load path will otherwise overwrite the user's files.
+
+```clojure
+;; deps.edn
+:test {:extra-paths ["test"]
+       :jvm-opts ["-Dmyapp.state-file=/tmp/myapp-test-state.edn"]}
+```
+
+### Background work must not outlive its test
+
+A test that waits until a stubbed render was *called* can end while the future that called it is still finishing. Under load the leftover work lands inside the next test, which fails on code it never touched. Resetting app state between tests does not help if it also resets the counter the leftover work checks. Drain in-flight work in an `:each` fixture, and wait on conditions with long deadlines instead of sleeping:
+
+```clojure
+(defn- drain-background-work []
+  (let [deadline (+ (System/currentTimeMillis) 30000)]
+    (while (and (pos? @pending-work) (< (System/currentTimeMillis) deadline))
+      (Thread/sleep 10))))
+
+(use-fixtures :each (fn [f] (reset-state!) (f) (drain-background-work)))
+```
+
+A 30 s deadline costs nothing when the condition holds quickly; a 2 s deadline fails on a busy machine.
+
+### After moving functions between namespaces, call through the alias
+
+`(:require [my.render :refer [render-page]])` in a warm JVM keeps the caller bound to the OLD var if the caller's namespace already defined that name. Tests pass warm on stale code and fail cold. Use alias-qualified calls (`render/render-page`) after any move, and point `with-redefs` at the new var. The cold full suite is what catches this; keep it as the commit gate.
+
+### Split wall-clock tests out of the commit gate
+
+Tests that assert a time budget pass and fail on identical code depending on load. Tag them and give them their own suite:
+
+```clojure
+;; tests.edn
+{:tests [{:id :unit :test-paths ["test"] :ns-patterns ["-test$"] :skip-meta [:perf]}
+         {:id :perf :test-paths ["test"] :ns-patterns ["-test$"] :focus-meta [:perf]}]
+ :fail-fast? true}
+```
+
+```make
+runtests-once:   # the commit gate; output saved, kaocha's exit code kept
+	@bash -o pipefail -c 'bin/kaocha --fail-fast unit 2>&1 | tee TEST-OUTPUT.txt'
+perftests:       # run on a quiet machine; every timing reported
+	@echo "Load: $$(uptime | sed 's/.*averages: //')"
+	@bash -o pipefail -c 'bin/kaocha --no-fail-fast perf 2>&1 | tee TEST-OUTPUT-perf.txt'
+```
+
+`:skip-meta` is honored by warm `test-focus` runs as well. A global `:fail-fast? true` stops the perf suite at its first slow test, so pass `--no-fail-fast` there. For a timing test itself: warm up at the measured size first, take the best of 3 runs, and never read a timing taken above ~1.5 load per core.
+
+### Keep the cold full suite, in the background, with its output saved
+
+The warm loop is the inner loop; a cold `make runtests-once` before each commit is the gate. Run it in the background and tee it to a file: an unsaved failure from a flaky run cannot be diagnosed afterwards.
+
+### Shell quoting
+
+In zsh, `test-focus $NS` with `NS="a-test b-test"` passes ONE argument and the check is refused. Spell namespaces out, or use `${=NS}`.
+
+### Reading timings
+
+Note the load average beside every timing you report. On a laptop with large swap use, an idle JVM is paged out and its next check can take many times longer. That measures the machine, not the code.
+
 ## Quick reference
 
 ```sh
