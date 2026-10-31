@@ -357,6 +357,21 @@ $KS/bin/sublime-loop --root server2 down
 Stop the JVM at the end of a session and before you delete a worktree. Each JVM uses
 up to 512 MB of heap.
 
+## 13. Delegating to agents
+
+When a coordinating session (the "main loop") hands test-backed work to agents, the warm JVM is shared infrastructure. These rules keep a batch to one COLD START per root. Repo-specific details (roots, aliases, gate commands) belong in each repo's own agent brief, which should point here rather than copy this section.
+
+1. **The coordinator owns the warm JVM.** Before dispatch it pulls kaocha-sublime and runs `warm-jvm --root <root> --aliases <aliases>` (inside the agent's worktree when there is one; see section 11), and names the root and aliases in each agent's prompt. That is the one COLD START per root.
+2. **Agents run only `test-focus`.** Never `warm-jvm`, `sublime-loop up`/`down`, `bin/kaocha`, or a cold `clojure -M:test`.
+3. **Write each new file in one complete save** (ns form, requires, first test), and create all new files before the first check. A half-written namespace fails at `stage: reload`; fix it and rerun. It is not a reason to restart.
+4. **`UNVERIFIED` is not permission to restart.** Wait and rerun `test-focus`.
+5. **No dependency, path or alias change mid-batch.** Such a change correctly forces a COLD START. An agent that needs one stops and reports it; the coordinator makes the change before the next batch.
+6. **Never upgrade kaocha-sublime itself while agents are running.** The fingerprint covers the runner, so a runner change restarts every warm JVM on the machine that uses it on its next check, in every repo. Pull upgrades between batches, and tell other active seats on the same machine.
+7. **`startup exceeded 90 seconds` or any `unknown` status:** read `<root>/.dev-loop/boot.log`, report it, and stop testing.
+8. **Every agent reports each COLD START with its receipt `error` text** (`grep -h '"error"' <root>/.dev-loop/result-*.json | sort | uniq -c`). The agent's budget is zero; the coordinator's is one per root.
+9. **Per-var focus (`ns/var`) while iterating;** name the namespaces for the final check. The full-suite gate belongs to the coordinator (sequential, in the background) or CI, never to an agent.
+10. **The coordinator runs `sublime-loop down` at the end** and confirms the PID is gone.
+
 ## Quick reference
 
 ```sh
