@@ -162,3 +162,86 @@
   (is (runner/jvm-usable? (ex-info "Syntax error" {} (RuntimeException. "EOF"))))
   (is (not (runner/jvm-usable? (RuntimeException. "load" (OutOfMemoryError. "heap")))))
   (is (not (runner/jvm-usable? (StackOverflowError.)))))
+
+;; ---------------------------------------------------------------- ks-216 timings
+
+(defn- timed-node [id nanos counts & [skip?]]
+  (cond-> (merge {:kaocha.testable/id id :kaocha.testable/type :kaocha.type/var}
+                 (when nanos {:kaocha.plugin.profiling/duration nanos})
+                 counts)
+    skip? (assoc :kaocha.testable/skip true)))
+
+;; INTENT-TEST: LOOP-RECEIPT-LOAD-SLOWEST-006
+(deftest test-timings-name-each-var-with-its-duration-and-outcome
+  (let [tree (result (timed-node :demo.core-test/quick 1234567 {:kaocha.result/pass 1})
+                     (timed-node :demo.core-test/slow 812400000 {:kaocha.result/pass 1 :kaocha.result/fail 1})
+                     (timed-node :demo.core-test/boom 5000000 {:kaocha.result/error 1})
+                     (timed-node :demo.core-test/later 2000000 {:kaocha.result/pending 1})
+                     (timed-node :demo.core-test/skipped 9000000000 {} true)
+                     (timed-node :demo.core-test/untimed nil {:kaocha.result/pass 1}))
+        timings (runner/test-timings tree)]
+    (is (= [{:test "demo.core-test/quick" :ms 1.2 :outcome "pass"}
+            {:test "demo.core-test/slow" :ms 812.4 :outcome "fail"}
+            {:test "demo.core-test/boom" :ms 5.0 :outcome "error"}
+            {:test "demo.core-test/later" :ms 2.0 :outcome "pending"}]
+           timings)
+        "run order, ms to 0.1; skipped and untimed vars are left out")
+    (is (= ["demo.core-test/slow" "demo.core-test/boom"]
+           (mapv :test (runner/slowest timings 2))))
+    (is (= 4 (count (runner/slowest timings runner/slowest-default))) "fewer vars than N: all of them")
+    (is (= [] (runner/slowest timings 0)))))
+
+;; ---------------------------------------------------------------- ks-wzy perf mode
+
+;; INTENT-TEST: LOOP-PERF-MODE-008
+(deftest perf-vars-are-the-perf-tagged-test-vars-of-the-targets
+  (require 'kaocha-sublime.runner-fixture :reload)
+  (is (= '[kaocha-sublime.runner-fixture/timed]
+         (runner/perf-vars '[kaocha-sublime.runner-fixture])) "a namespace: its ^:perf deftests only")
+  (is (= '[kaocha-sublime.runner-fixture/timed]
+         (runner/perf-vars '[kaocha-sublime.runner-fixture/timed])) "a ^:perf var target")
+  (is (= [] (runner/perf-vars '[kaocha-sublime.runner-fixture/present])) "an untagged var target")
+  (is (= [] (runner/perf-vars '[kaocha-sublime.runner-fixture/not-a-test])) "a plain def"))
+
+;; INTENT-TEST: LOOP-PERF-MODE-008
+(deftest a-perf-run-unskips-perf-at-the-top-level-and-in-every-suite
+  (let [probe-unskip (requiring-resolve 'kaocha-sublime.probe/unskip-meta)
+        cfg {:kaocha.filter/skip-meta [:perf :slow]
+             :kaocha/tests [{:kaocha.testable/id :unit :kaocha.filter/skip-meta [:perf]}
+                            {:kaocha.testable/id :perf :kaocha.filter/focus-meta [:perf]}]}]
+    (is (= {:kaocha.filter/skip-meta [:slow]
+            :kaocha/tests [{:kaocha.testable/id :unit :kaocha.filter/skip-meta []}
+                           {:kaocha.testable/id :perf :kaocha.filter/focus-meta [:perf]}]}
+           (probe-unskip cfg [:perf])))
+    (is (= cfg (probe-unskip cfg nil)) "an ordinary check keeps tests.edn's skips")))
+
+;; INTENT-TEST: LOOP-PERF-MODE-008
+(deftest with-no-namespace-named-perf-mode-takes-the-default-suites-test-namespaces
+  (let [test-namespaces @#'runner/test-namespaces
+        filemap {(io/file "test/kaocha_sublime/runner_test.clj") 'kaocha-sublime.runner-test
+                 (io/file "test/kaocha_sublime/driver.clj") 'kaocha-sublime.driver
+                 (io/file "src/kaocha_sublime/runner.clj") 'kaocha-sublime.runner}]
+    (is (= '[kaocha-sublime.runner-test]
+           (binding [*out* (java.io.StringWriter.) *err* (java.io.StringWriter.)] (test-namespaces filemap))))))
+
+;; INTENT-TEST: LOOP-PERF-MODE-008
+(deftest a-perf-check-without-perf-tests-is-refused-by-name
+  ;; The refusal comes after a complete reload and runs nothing: no nested Kaocha run.
+  (let [r (runner/check! ["kaocha-sublime.runner-fixture/present"] {:perf true})]
+    (is (= "fail" (:status r)))
+    (is (= "focus" (:stage r)))
+    (is (= "no ^:perf test vars in: kaocha-sublime.runner-fixture/present" (:error r)))
+    (is (= [] (:perf-selected r)))
+    (is (= ["kaocha-sublime.runner-fixture"] (:reload-targets r)))))
+
+;; ---------------------------------------------------------------- ks-mn0 repeat
+
+;; INTENT-TEST: LOOP-REPEAT-007
+(deftest a-repeat-run-can-skip-the-reload
+  (let [r (runner/check! ["kaocha-sublime.runner-fixture/absent"] {:reload false})]
+    (is (= "focus" (:stage r)))
+    (is (false? (:reloaded r)))
+    (is (= [] (:reload-targets r)) "nothing reloaded"))
+  (let [r (runner/check! ["kaocha-sublime.runner-fixture/absent"])]
+    (is (not (contains? r :reloaded)) "the default reloads, as before")
+    (is (= ["kaocha-sublime.runner-fixture"] (:reload-targets r)))))

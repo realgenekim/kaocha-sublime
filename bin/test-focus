@@ -4,6 +4,9 @@
 #   test-focus my.app.core-test my.app.db-test
 #   test-focus my.app.core-test/adds-two my.app.db-test     # one var, plus a whole namespace
 #   test-focus --root server2 --aliases :run-tests:dev:test server2.handlers.discover-test
+#   test-focus --repeat 10 my.app.core-test/flaky-one   # rerun 10x warm; tally + verdict
+#   test-focus --perf                                    # every ^:perf test, load printed first
+#   test-focus --perf my.app.render-test --slowest 10
 #
 # Thin wrapper over sublime-loop check. When no warm JVM is up, it is tainted, or its
 # dependencies/runner/aliases changed, it says so LOUDLY on stderr ("COLD START"), starts
@@ -16,20 +19,38 @@
 # resolves from anywhere in the checkout. A failing check's receipt carries "failures": each
 # failing assertion with test var, file:line, message, expected, actual and the test's captured
 # stdout/stderr; a readable block of the same goes to stderr after the JSON line.
+# Every check receipt carries load_1m, cpus, per_core and load_1m_end, and "slowest" (the N
+# slowest test vars, default 5, --slowest N); the block's first line shows the load and the
+# slowest test. --repeat N (1-50) reruns the selection N times in the warm JVM, reloading only
+# when files change, and reports a per-test tally and a verdict (stable-pass, stable-fail,
+# flaky) in "repeat". --perf runs only the ^:perf test vars of the named namespaces (of all
+# test namespaces when none is named), never fail-fast, and reports each duration in
+# "perf-tests"; the load is printed before the run starts.
 # Exit code is the check's: 0 pass, 1 fail/stale/tainted, 2 unknown.
 # Pass the same --root/--aliases you gave warm-jvm. Docs: docs/SETUP.md in this library.
 set -euo pipefail
 LOOP="$(cd "$(dirname "$0")" && pwd)/sublime-loop"
-flags=(); names=()
+flags=(); checkflags=(); names=(); perf=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --root|--aliases|--env)
       [ $# -ge 2 ] || { echo "test-focus: $1 needs a value" >&2; exit 2; }
       flags+=("$1" "$2"); shift 2 ;;
+    --repeat|--slowest)
+      [ $# -ge 2 ] || { echo "test-focus: $1 needs a value" >&2; exit 2; }
+      checkflags+=("$1" "$2"); shift 2 ;;
+    --perf) checkflags+=("$1"); perf=1; shift ;;
     *) names+=("$1"); shift ;;
   esac
 done
-[ ${#names[@]} -gt 0 ] || { echo "test-focus: name at least one test namespace or ns/test-var" >&2; exit 2; }
+[ ${#names[@]} -gt 0 ] || [ "$perf" -eq 1 ] || {
+  echo "test-focus: name at least one test namespace or ns/test-var (or use --perf)" >&2; exit 2; }
+# INTENT: LOOP-PERF-MODE-008
+# A timing is only as good as the machine it ran on: say the load before the perf run starts.
+if [ "$perf" -eq 1 ]; then
+  echo "test-focus: --perf; load averages $(uptime | sed 's/.*load average[s]*: //') on" \
+       "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo '?') cpus, before the run" >&2
+fi
 # The check's human-readable failure block (stderr) is held until after the JSON line, so it
 # is the last thing on screen rather than buried above one long line.
 block="$(mktemp "${TMPDIR:-/tmp}/test-focus.XXXXXX")"
@@ -67,12 +88,12 @@ case "$status" in
   *) echo "test-focus: the loop could not report on the warm JVM (no JVM started); see the receipt" >&2
      printf '%s\n' "$status"; exit 2 ;;
 esac
-out="$("$LOOP" ${flags[@]+"${flags[@]}"} check "${names[@]}" 2>"$block")" && rc=0 || rc=$?
+out="$("$LOOP" ${flags[@]+"${flags[@]}"} ${checkflags[@]+"${checkflags[@]}"} check ${names[@]+"${names[@]}"} 2>"$block")" && rc=0 || rc=$?
 case "$out" in
   *'runner or dependencies changed'*)
     cold "dependencies, runner or aliases changed"
     down; up
-    out="$("$LOOP" ${flags[@]+"${flags[@]}"} check "${names[@]}" 2>"$block")" && rc=0 || rc=$? ;;
+    out="$("$LOOP" ${flags[@]+"${flags[@]}"} ${checkflags[@]+"${checkflags[@]}"} check ${names[@]+"${names[@]}"} 2>"$block")" && rc=0 || rc=$? ;;
 esac
 printf '%s\n' "$out"
 cat "$block" >&2

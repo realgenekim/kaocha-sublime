@@ -6,3 +6,5 @@
 (def not-a-test 1)
 
 (deftest present (is true))
+
+(deftest ^:perf timed (is true))

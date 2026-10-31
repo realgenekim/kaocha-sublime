@@ -216,10 +216,11 @@ $KS/bin/test-focus --root server2 --aliases :run-tests:dev:test \
   ```
 
   `println` in a test is a fine way to see a value: it arrives in `output`.
-- After the JSON line, a failed check prints a readable block on stderr, one stanza per
-  failure, so a plain terminal run needs no `jq`:
+- After the JSON line, a check prints a readable block on stderr: the load line (below),
+  then for a failed check one stanza per failure, so a plain terminal run needs no `jq`:
 
   ```text
+  test-focus: load 3.1 on 8 cpus (0.39/core), 3.4 at end; slowest demo.core-test/throws 12.0 ms
   test-focus: FAIL -- 4 tests, 1 fail, 1 error
 
   FAIL demo.core-test/adds-wrong  test/demo/core_test.clj:12
@@ -240,6 +241,56 @@ $KS/bin/test-focus --root server2 --aliases :run-tests:dev:test \
   the paths tried, and no JVM started (never a COLD START).
 - The first check in a fresh JVM loads Kaocha and your code (10-20 s). Later checks
   take seconds.
+- Every check records the machine it ran on and its slowest tests. The receipt carries
+  `load_1m`, `cpus` and `per_core` (the 1-minute load at the start of the check),
+  `load_1m_end`, and `slowest`: the 5 slowest test vars that ran, slowest first, each
+  `{"test", "ms", "outcome"}` (`--slowest N`, 0-50, changes how many). The stderr block
+  always starts with one line:
+
+  ```text
+  test-focus: load 11.88 on 8 cpus (1.49/core), 11.88 at end; slowest demo.core-test/adds 43.8 ms
+  ```
+
+  Above 1.5 per core the line adds `[busy: timings measure the machine]`.
+- `--repeat N` (1-50) runs the same selection N times in the warm JVM, to surface a flake or
+  to show one is gone: `test-focus --repeat 10 my.app.core-test/flaky-one`. Only the first
+  run reloads the dependency closure; a later run reloads again only when source files
+  changed since that reload. (The probe always reloads the named test namespaces
+  themselves, so `defonce` state in a test namespace starts fresh each run; state in
+  source namespaces carries over.) Kaocha's randomize plugin, when enabled, picks a new
+  order each run. The receipt gains `repeat`: `requested`, `runs`, `verdict`
+  (`stable-pass`, `stable-fail`, `flaky`, or `incomplete` when a run produced no test
+  results, such as a reload error, and the repeat stopped), counts of `flaky`,
+  `stable_fail` and `stable_pass` tests, `tally` (one row per test: `runs`, `pass`,
+  `fail`, `error`, `verdict`; flaky rows first) and `per_run` (`status`, `reloaded`,
+  counts). `status` is `pass` only for `stable-pass`, and `stale` when files changed
+  during the repeat. The other top-level fields (`counts`, `failures`, `path`, `slowest`)
+  describe the first run that did not pass, else the last run.
+
+  ```text
+  test-focus: REPEAT 5 of 5 runs -- flaky (1 flaky, 0 stable-fail, 1 stable-pass)
+    flaky       demo.core-test/wobbly  3/5 pass
+  ```
+- `--perf` runs only the test vars tagged `^:perf` (the convention in
+  [section 14](#split-wall-clock-tests-out-of-the-commit-gate)), in the named namespaces
+  or vars, or in every test namespace of the default suite when none is named:
+  `test-focus --perf`, `test-focus --perf my.app.render-test`. It un-skips `:perf` even
+  when `tests.edn` has `:skip-meta [:perf]`, never fails fast, prints the load average
+  before the run starts, and lists every timing test. The receipt gains `perf-selected`
+  (the vars chosen) and `perf-tests` (each `{"test", "ms", "outcome"}`, in run order). A
+  selection with no `^:perf` var is refused (`stage: focus`,
+  `error: "no ^:perf test vars in: ..."`) and the JVM stays warm.
+
+  ```text
+  test-focus: --perf; load averages 12.49 13.53 23.66 on 8 cpus, before the run
+  test-focus: load 12.49 on 8 cpus (1.56/core), 15.66 at end [busy: timings measure the machine]; slowest demo.core-test/sleepy-under-budget 196.8 ms
+  test-focus: PERF -- 3 timing tests
+         129.9 ms  pass    demo.other-test/other-timing
+          76.6 ms  pass    demo.core-test/big-sum-under-budget
+         196.8 ms  pass    demo.core-test/sleepy-under-budget
+  ```
+
+  `--repeat` and `--perf` combine: `test-focus --perf --repeat 3 my.app.render-test`.
 
 The red-green loop: write the failing test, `test-focus` (expect `fail`, exit 1),
 make it pass, `test-focus` (expect `pass`, exit 0).
@@ -292,8 +343,12 @@ Every command prints one `dev-loop.v1` JSON receipt and also writes it to
 Useful fields in a check receipt: `counts` (tests, assertions, pass, fail, error,
 skipped-by-focus), `failures` and `failures-omitted` (see section 7), `wall_s` (time for
 this check), `reload-targets` (namespaces reloaded), `path` (Kaocha run receipt, EDN),
-`checks` (the targets you named), `generation`. A `fail` with `stage: focus` means a named
-test var does not exist; the JVM stays warm.
+`checks` (the targets you named), `generation`, `load_1m` / `cpus` / `per_core` (load at the
+start) and `load_1m_end`, `slowest` (the N slowest test vars with `ms`), and with the
+matching option `repeat` (`--repeat`) or `perf-selected` / `perf-tests` (`--perf`); see
+section 7. A `fail` with `stage: focus` means a named test var does not exist, or (`--perf`)
+that the selection has no `^:perf` var; the JVM stays warm. Read a timing beside its
+`per_core`: above about 1.5 it measures the machine, not the code.
 
 A `fail` with `stage: reload` means a namespace did not load. Nothing ran, and the check
 is never a `pass`. The receipt carries:
@@ -424,7 +479,7 @@ perftests:       # run on a quiet machine; every timing reported
 	@bash -o pipefail -c 'bin/kaocha --no-fail-fast perf 2>&1 | tee TEST-OUTPUT-perf.txt'
 ```
 
-`:skip-meta` is honored by warm `test-focus` runs as well. A global `:fail-fast? true` stops the perf suite at its first slow test, so pass `--no-fail-fast` there. For a timing test itself: warm up at the measured size first, take the best of 3 runs, and never read a timing taken above ~1.5 load per core.
+`:skip-meta` is honored by warm `test-focus` runs as well. A global `:fail-fast? true` stops the perf suite at its first slow test, so pass `--no-fail-fast` there. In the warm loop, `test-focus --perf` runs the `^:perf` tests directly (it un-skips `:perf`, never fails fast and prints the load first; see section 7). For a timing test itself: warm up at the measured size first, take the best of 3 runs, and never read a timing taken above ~1.5 load per core.
 
 ### Keep the cold full suite, in the background, with its output saved
 
@@ -444,6 +499,8 @@ Note the load average beside every timing you report. On a laptop with large swa
 KS=~/src.local/kaocha-sublime
 $KS/bin/warm-jvm     --root R [--aliases :a:b]           # start (background)
 $KS/bin/test-focus   --root R [--aliases :a:b] NS|NS/VAR... # focused check
+$KS/bin/test-focus   --root R --repeat 10 NS/VAR            # flake hunt: tally + verdict
+$KS/bin/test-focus   --root R --perf [NS...]                # ^:perf tests, load first
 $KS/bin/sublime-loop --root R [--aliases :a:b] status     # is it up?
 $KS/bin/sublime-loop --root R down                        # stop
 ```

@@ -230,6 +230,8 @@ checks named namespaces in it. Repos call it from here, through a
 sublime-loop --root <dir> up            # boot (or attest) the runner
 sublime-loop --root <dir> check NS...   # reload the dependency closure, run NS
 sublime-loop --root <dir> check NS/VAR  # same, but run only that test var
+sublime-loop --root <dir> --repeat 5 check NS   # same selection 5x; per-test tally, verdict
+sublime-loop --root <dir> --perf check [NS...]  # only ^:perf test vars, each timed
 sublime-loop --root <dir> status
 sublime-loop --root <dir> down
 ```
@@ -245,7 +247,15 @@ nrepl, tools.namespace, `-m kaocha-sublime.runner`), so no repo alias names the 
 A failed `check` receipt carries `failures` (each failing assertion: test var, `file:line`,
 message, `testing` context, expression, bounded `expected`/`actual`, and the test's captured
 stdout/stderr tail) and `failures-omitted`, and prints a readable block of the same on
-stderr after the JSON line. Field reference: docs/SETUP.md section 7.
+stderr after the JSON line. Every `check` receipt also carries the 1-minute load at its
+start and end (`load_1m`, `cpus`, `per_core`, `load_1m_end`) and `slowest`, the N
+(`--slowest N`, default 5) slowest test vars with durations in ms; the stderr block starts
+with one line naming both. `--repeat N` (1-50) reruns the selection N times in the warm JVM
+(reloading the dependency closure only when files change) and adds `repeat`: a per-test
+tally and a verdict, `stable-pass`, `stable-fail` or `flaky`. `--perf` runs only `^:perf`
+test vars (of the named namespaces, else of every test namespace), never fail-fast, prints
+the load first and lists each duration in `perf-tests`. Field reference: docs/SETUP.md
+section 7.
 
 A repo needs no alias for the library. An optional `:sublime` alias carries only
 project extras (for example `:extra-paths ["dev"]`); see docs/SETUP.md. `bin/warm-jvm`

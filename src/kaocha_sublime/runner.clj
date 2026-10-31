@@ -7,6 +7,8 @@
   - `identity-data` {:root :pid :generation :role \"test-only\"}
   - `(check! [\"ns-name\" ...])` -> {:status \"pass\"|\"fail\"|\"unknown\" :counts ...}
     (a failed reload adds :reload-failure, :not-reloaded and :jvm-usable)
+  - `(check! names {:reload bool :perf bool :slowest n :timings bool})` the same, with
+    options (see `check!`); a run adds :slowest, and :test-timings / :perf-tests on request
   - `(write-json value)` -> JSON string (the CLI's transport receipt encoder)
   - `-main` writes `.dev-loop/session.json` atomically once nREPL listens."
   (:require
@@ -18,6 +20,7 @@
    [clojure.tools.namespace.dir :as scan]
    [clojure.tools.namespace.track :as track]
    [kaocha.hierarchy :as hierarchy]
+   [kaocha.config :as config]
    [kaocha.testable :as testable]
    [kaocha-sublime.agent :as agent]
    [kaocha-sublime.probe :as probe]
@@ -268,81 +271,182 @@
          (apply concat)
          (apply array-map))))
 
+;; ---------------------------------------------------------------- timings
+
+(def slowest-default "How many of the slowest test vars a check receipt names." 5)
+
+(defn- test-name [id]
+  (if (and (keyword? id) (namespace id)) (str (namespace id) "/" (name id)) (some-> id name)))
+
+(defn- var-outcome [node]
+  (let [n #(or (get node %) 0)]
+    (cond (pos? (n :kaocha.result/error)) "error"
+          (pos? (n :kaocha.result/fail)) "fail"
+          (pos? (n :kaocha.result/pending)) "pending"
+          :else "pass")))
+
+;; INTENT: LOOP-RECEIPT-LOAD-SLOWEST-006
+(defn test-timings
+  "Every test var that ran in a Kaocha result tree, in run order:
+  {:test \"ns/var\" :ms duration :outcome \"pass\"|\"fail\"|\"error\"|\"pending\"}.
+  The duration is Kaocha's profiling plugin's, in milliseconds to 0.1 ms; skipped vars
+  and vars without a recorded duration are left out."
+  [result]
+  (vec (for [node (testable/test-seq result)
+             :when (= :kaocha.type/var (:kaocha.testable/type node))
+             :when (not (:kaocha.testable/skip node))
+             :let [nanos (:kaocha.plugin.profiling/duration node)]
+             :when (integer? nanos)]
+         (array-map :test (test-name (:kaocha.testable/id node))
+                    :ms (/ (Math/round (/ (double nanos) 1e5)) 10.0)
+                    :outcome (var-outcome node)))))
+
+(defn slowest
+  "The `n` slowest entries of `timings`, slowest first."
+  [timings n]
+  (vec (take (max 0 n) (sort-by :ms > timings))))
+
+;; ---------------------------------------------------------------- perf selection
+
+;; INTENT: LOOP-PERF-MODE-008
+(defn perf-vars
+  "The ^:perf test vars a perf check runs, as qualified symbols: for a namespace target
+  every var with both :test and :perf metadata (in line order); for a var target, that
+  var when it carries :perf. Namespaces must already be loaded."
+  [targets]
+  (vec (distinct
+        (for [sym targets
+              v (if (namespace sym)
+                  (some-> (try (find-var sym) (catch Exception _ nil)) vector)
+                  (some->> (find-ns sym) ns-interns vals (sort-by #(:line (meta %) 0))))
+              :let [m (meta v)]
+              :when (and (:test m) (:perf m))]
+          (symbol (str (:ns m)) (str (:name m)))))))
+
+(defn- test-namespaces
+  "The namespaces of the default (:unit) suite in a scan: files under its test paths
+  whose names match its ns-patterns. What a perf check runs when no namespace is named."
+  [filemap]
+  (let [suite (or (first (filter #(= :unit (:kaocha.testable/id %))
+                                 (:kaocha/tests (config/load-config
+                                                 (config/find-config-and-warn "tests.edn") {}))))
+                  {})
+        paths (map #(str (.getCanonicalPath (io/file %)) java.io.File/separator)
+                   (or (:kaocha/test-paths suite) ["test"]))
+        patterns (map re-pattern (or (:kaocha/ns-patterns suite) ["-test$"]))]
+    (vec (sort (for [[^java.io.File f ns] filemap
+                     :when (some #(str/starts-with? (.getCanonicalPath f) %) paths)
+                     :when (some #(re-find % (str ns)) patterns)]
+                 ns)))))
+
 (defn check!
   "Reload the declared dependency closure of the requested namespaces, then run
   exactly those targets through the Sublime probe. A target is a namespace
   (\"my.app-test\") or one test var (\"my.app-test/adds\"); a var's namespace is
-  reloaded as if it were named."
-  [namespaces]
-  (locking runner-lock
-    (let [requested (mapv symbol namespaces)
-          requested-ns (vec (distinct (map #(symbol (or (namespace %) (name %))) requested)))
-          base {:image-identity "unknown" :mode "development-probe"}
-          scanned (try
-                    (let [tracker (scan/scan-dirs (track/tracker) (source-dirs))
-                          graph (::track/deps tracker)
-                          closure (into (set requested-ns)
-                                        (mapcat #(dependency/transitive-dependencies graph %) requested-ns))]
-                      {:targets (filterv closure (::track/load tracker))
-                       :files (into {} (map (fn [[f ns]] [ns f]))
-                                    (:clojure.tools.namespace.file/filemap tracker))})
-                    (catch Throwable t {:error t}))]
-      (if-let [t (:error scanned)]
-        ;; A scan only reads files; nothing was loaded, so the JVM stays usable.
-        (assoc base :status "fail" :stage "dependency-scan" :error (.getMessage ^Throwable t)
-               :jvm-usable true)
-        (let [targets (:targets scanned)
-              ;; Explicit :reload in dependency order (curtaincall variant) rather than
-              ;; handing source namespaces to the probe as focus targets (CD variant):
-              ;; edited sources are reloaded for certain, and the probe scope and its
-              ;; receipt stay exactly the namespaces the caller asked for.
-              reload-error (reduce (fn [_ target]
-                                     (try (require target :reload) nil
-                                          (catch Throwable t (reduced {:namespace target :error t}))))
-                                   nil targets)]
-          (if reload-error
-            ;; No counts and never a pass: nothing ran. The failed namespace (and the
-            ;; ones after it) keep their previous definitions until the next check, which
-            ;; reloads the whole closure again and so repairs them; the JVM stays warm
-            ;; unless the error says the JVM itself is in trouble (jvm-usable false).
-            (let [failure (reload-failure (:namespace reload-error) (:error reload-error)
-                                          (get (:files scanned) (:namespace reload-error)))]
-              (assoc base :status "fail" :stage "reload"
-                     :error (str "reload of " (:namespace failure) " failed"
-                                 (when (:at failure) (str " at " (:at failure))) ": " (:message failure))
-                     :reload-failure failure
-                     :failures [(-> (select-keys failure [:at :file :line :message])
-                                    (assoc :kind "load" :test (:namespace failure)))]
-                     :failures-omitted 0
-                     :not-reloaded (mapv str (drop-while #(not= % (:namespace reload-error)) targets))
-                     :jvm-usable (jvm-usable? (:error reload-error))
-                     :reload-targets (mapv str targets)))
-            (if-let [missing (seq (missing-test-vars requested))]
-              ;; A typo'd var would focus on nothing and come back "unknown" with zero
-              ;; tests; say exactly which name is wrong instead.
-              (assoc base :status "fail" :stage "focus"
-                     :error (str "no such test var: " (str/join ", " missing))
-                     :reload-targets (mapv str targets))
-            (let [result (probe/run requested
-                                    {:plugins [:kaocha.plugin/filter :kaocha.plugin/run-receipt]
-                                     :kaocha.plugin.run-receipt/dir ".dev-loop/kaocha-runs"
-                                     :kaocha.plugin.run-receipt/include-tests? true
-                                     :kaocha/fail-fast? false})
-                  receipt (when (:path result) (edn/read-string (slurp (:path result))))
-                  counts (:totals receipt)
-                  details (try (some-> (:result result) failure-details)
-                               (catch Throwable t
-                                 {:failures [{:kind "error" :test "kaocha-sublime.runner/failure-details"
-                                              :message (str "could not build failure details: " (.getMessage t))}]
-                                  :failures-omitted 0}))]
-              (assoc (merge base (when (seq (:failures details)) details))
-                     ;; probe exit 0 already requires complete coverage and >0 tests
-                     ;; (protocol/outcome), which subsumes the template's count>0 guard.
-                     :status (case (:exit result) 0 "pass" 1 "fail" "unknown")
-                     :stage "probe" :exit (:exit result) :path (:path result)
-                     :events (:events result) :counts counts
-                     :reload-targets (mapv str targets)
-                     :error (some-> ^Throwable (:error result) .getMessage))))))))))
+  reloaded as if it were named.
+
+  Options: :reload false skips the dependency-closure reload (a repeat run over
+  unchanged files; the probe still reloads the target test namespaces themselves);
+  :perf true runs only the ^:perf test vars of the targets (all of the default suite's
+  test namespaces when none are named), un-skipping :perf, and adds :perf-tests;
+  :slowest n names the n slowest test vars (default `slowest-default`); :timings true
+  adds :test-timings, every var that ran with its outcome and duration."
+  ([namespaces] (check! namespaces {}))
+  ([namespaces {:keys [reload perf timings] :or {reload true} :as opts}]
+   (locking runner-lock
+     (let [requested (mapv symbol namespaces)
+           slowest-n (if (integer? (:slowest opts)) (:slowest opts) slowest-default)
+           base {:image-identity "unknown" :mode "development-probe"}
+           scanned (try
+                     (let [tracker (scan/scan-dirs (track/tracker) (source-dirs))
+                           graph (::track/deps tracker)
+                           filemap (:clojure.tools.namespace.file/filemap tracker)
+                           requested (if (and perf (empty? requested)) (test-namespaces filemap) requested)
+                           requested-ns (vec (distinct (map #(symbol (or (namespace %) (name %))) requested)))
+                           closure (into (set requested-ns)
+                                         (mapcat #(dependency/transitive-dependencies graph %) requested-ns))]
+                       {:targets (if reload (filterv closure (::track/load tracker)) [])
+                        :requested requested
+                        :files (into {} (map (fn [[f ns]] [ns f])) filemap)})
+                     (catch Throwable t {:error t}))
+           requested (or (:requested scanned) requested)
+           base (cond-> base (not reload) (assoc :reloaded false))]
+       (if-let [t (:error scanned)]
+         ;; A scan only reads files; nothing was loaded, so the JVM stays usable.
+         (assoc base :status "fail" :stage "dependency-scan" :error (.getMessage ^Throwable t)
+                :jvm-usable true)
+         (let [targets (:targets scanned)
+               ;; Explicit :reload in dependency order (curtaincall variant) rather than
+               ;; handing source namespaces to the probe as focus targets (CD variant):
+               ;; edited sources are reloaded for certain, and the probe scope and its
+               ;; receipt stay exactly the namespaces the caller asked for.
+               reload-error (reduce (fn [_ target]
+                                      (try (require target :reload) nil
+                                           (catch Throwable t (reduced {:namespace target :error t}))))
+                                    nil targets)]
+           (if reload-error
+             ;; No counts and never a pass: nothing ran. The failed namespace (and the
+             ;; ones after it) keep their previous definitions until the next check, which
+             ;; reloads the whole closure again and so repairs them; the JVM stays warm
+             ;; unless the error says the JVM itself is in trouble (jvm-usable false).
+             (let [failure (reload-failure (:namespace reload-error) (:error reload-error)
+                                           (get (:files scanned) (:namespace reload-error)))]
+               (assoc base :status "fail" :stage "reload"
+                      :error (str "reload of " (:namespace failure) " failed"
+                                  (when (:at failure) (str " at " (:at failure))) ": " (:message failure))
+                      :reload-failure failure
+                      :failures [(-> (select-keys failure [:at :file :line :message])
+                                     (assoc :kind "load" :test (:namespace failure)))]
+                      :failures-omitted 0
+                      :not-reloaded (mapv str (drop-while #(not= % (:namespace reload-error)) targets))
+                      :jvm-usable (jvm-usable? (:error reload-error))
+                      :reload-targets (mapv str targets)))
+             (let [missing (seq (missing-test-vars requested))
+                   selected (when (and perf (not missing)) (perf-vars requested))]
+               (cond
+                 missing
+                 ;; A typo'd var would focus on nothing and come back "unknown" with zero
+                 ;; tests; say exactly which name is wrong instead.
+                 (assoc base :status "fail" :stage "focus"
+                        :error (str "no such test var: " (str/join ", " missing))
+                        :reload-targets (mapv str targets))
+
+                 (and perf (empty? selected))
+                 (assoc base :status "fail" :stage "focus"
+                        :error (str "no ^:perf test vars in: "
+                                    (if (seq requested) (str/join ", " requested) "the default suite's test namespaces"))
+                        :perf-selected []
+                        :reload-targets (mapv str targets))
+
+                 :else
+                 (let [result (probe/run (if perf selected requested)
+                                         (cond-> {:plugins [:kaocha.plugin/filter :kaocha.plugin/run-receipt
+                                                            :kaocha.plugin/profiling]
+                                                  :kaocha.plugin.profiling/profiling? false
+                                                  :kaocha.plugin.run-receipt/dir ".dev-loop/kaocha-runs"
+                                                  :kaocha.plugin.run-receipt/include-tests? true
+                                                  ;; Never fail-fast: every timing and every flake is reported.
+                                                  :kaocha/fail-fast? false}
+                                           perf (assoc :kaocha-sublime.probe/allow-meta [:perf])))
+                       receipt (when (:path result) (edn/read-string (slurp (:path result))))
+                       counts (:totals receipt)
+                       details (try (some-> (:result result) failure-details)
+                                    (catch Throwable t
+                                      {:failures [{:kind "error" :test "kaocha-sublime.runner/failure-details"
+                                                   :message (str "could not build failure details: " (.getMessage t))}]
+                                       :failures-omitted 0}))
+                       timed (try (some-> (:result result) test-timings) (catch Throwable _ nil))]
+                   (cond-> (assoc (merge base (when (seq (:failures details)) details))
+                                  ;; probe exit 0 already requires complete coverage and >0 tests
+                                  ;; (protocol/outcome), which subsumes the template's count>0 guard.
+                                  :status (case (:exit result) 0 "pass" 1 "fail" "unknown")
+                                  :stage "probe" :exit (:exit result) :path (:path result)
+                                  :events (:events result) :counts counts
+                                  :reload-targets (mapv str targets)
+                                  :slowest (slowest (or timed []) slowest-n)
+                                  :error (some-> ^Throwable (:error result) .getMessage))
+                     timings (assoc :test-timings (or timed []))
+                     perf (assoc :perf-selected (mapv str selected) :perf-tests (or timed [])))))))))))))
 
 (defn -main [& _]
   (let [server (nrepl/start-server :bind "127.0.0.1" :port 0)

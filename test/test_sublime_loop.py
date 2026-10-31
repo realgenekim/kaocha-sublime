@@ -786,3 +786,251 @@ class ReloadFailureTest(CheckTargetTest):
         self.loop({'status': 'fail', 'stage': 'dependency-scan', 'error': 'bad ns form',
                    'jvm-usable': True}).command('check', ['a.core-test'])
         self.assertFalse(self.run_dir.joinpath('tainted').exists())
+
+
+# ---------------------------------------------------------------- ks-216, ks-mn0, ks-wzy
+
+def timing(test, outcome='pass', ms=1.0):
+    return {'test': test, 'ms': ms, 'outcome': outcome}
+
+
+def run_receipt(status, *timings, **extra):
+    fail = sum(t['outcome'] == 'fail' for t in timings)
+    error = sum(t['outcome'] == 'error' for t in timings)
+    return dict({'status': status, 'stage': 'probe', 'path': '/r/%s.edn' % status,
+                 'counts': {'tests': len(timings), 'fail': fail, 'error': error},
+                 'slowest': sorted(timings, key=lambda t: -t['ms'])[:5],
+                 'test-timings': list(timings)}, **extra)
+
+
+class ScriptedCheckTest(Workspace):
+    """A Loop whose runner answers from a script, one receipt per check! call."""
+
+    def loop(self, *answers, on_call=None):
+        loop = cli.Loop(self.root, ':test', {}, False)
+        session = dict(record(self.root, os.getpid()), aliases=':test',
+                       environment=cli.environment_fingerprint(self.root))
+        loop.load_session = lambda: (session, None)
+        self.sent = []
+        script = list(answers)
+
+        def evaluate(session, expression):
+            self.sent.append(expression)
+            if on_call:
+                on_call(len(self.sent))
+            return dict(script.pop(0))
+        loop.evaluate = evaluate
+        return loop
+
+
+class ReceiptLoadSlowestTest(ScriptedCheckTest):
+    def invoke_check(self, answer, *args, loads=({'load_1m': 2.4, 'cpus': 8, 'per_core': 0.3},
+                                                 {'load_1m': 2.6, 'cpus': 8, 'per_core': 0.33})):
+        loads = list(loads)
+        err = io.StringIO()
+        out = io.StringIO()
+        with mock.patch.object(cli, 'load_per_core', lambda: loads.pop(0)), \
+                mock.patch.object(cli.Loop, 'load_session', lambda loop: (self.session, None)), \
+                mock.patch.object(cli.Loop, 'evaluate', lambda loop, s, e: self.sent.append(e) or dict(answer)), \
+                redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(['--root', str(self.root), *args])
+        return json.loads(out.getvalue().strip().splitlines()[-1]), code, err.getvalue()
+
+    def setUp(self):
+        super().setUp()
+        self.sent = []
+        self.session = dict(record(self.root, os.getpid()), aliases=':test',
+                            environment=cli.environment_fingerprint(self.root))
+
+    # INTENT-TEST: LOOP-RECEIPT-LOAD-SLOWEST-006
+    def test_a_check_receipt_records_load_at_start_and_end_and_the_slowest_tests(self):
+        answer = run_receipt('pass', timing('a.core-test/quick', ms=1.2), timing('a.core-test/slow', ms=812.4))
+        answer.pop('test-timings')
+        receipt, code, err = self.invoke_check(answer, 'check', 'a.core-test')
+        self.assertEqual(0, code)
+        self.assertEqual((2.4, 8, 0.3, 2.6), (receipt['load_1m'], receipt['cpus'], receipt['per_core'],
+                                               receipt['load_1m_end']))
+        self.assertEqual('a.core-test/slow', receipt['slowest'][0]['test'])
+        for key in ('status', 'counts', 'checks', 'wall_s', 'queue_s', 'source', 'generation',
+                    'verification_complete', 'wrapper_receipt'):
+            self.assertIn(key, receipt, 'existing fields are kept: ' + key)
+        wrapper = json.loads(Path(receipt['wrapper_receipt']).read_text())
+        self.assertEqual(2.6, wrapper['load_1m_end'], 'the wrapper receipt carries the same fields')
+        self.assertEqual('test-focus: load 2.4 on 8 cpus (0.3/core), 2.6 at end; slowest a.core-test/slow 812.4 ms\n',
+                         err, 'a passing check prints exactly one line')
+        self.assertIn(':slowest 5', self.sent[0])
+
+    # INTENT-TEST: LOOP-RECEIPT-LOAD-SLOWEST-006
+    def test_a_refused_check_still_records_the_load(self):
+        receipt, code, err = self.invoke_check({}, 'check', 'a.core-test/x y')
+        self.assertEqual(('unknown', 2), (receipt['status'], code))
+        self.assertEqual(2.4, receipt['load_1m'])
+        self.assertTrue(err.startswith('test-focus: load 2.4 on 8 cpus'))
+        status, _, _ = self.invoke_check({}, 'status')
+        self.assertNotIn('load_1m', status, 'only check receipts carry the load')
+
+    # INTENT-TEST: LOOP-RECEIPT-LOAD-SLOWEST-006
+    def test_slowest_n_is_passed_to_the_runner_and_bounded(self):
+        self.invoke_check(run_receipt('pass', timing('a/b')), '--slowest', '12', 'check', 'a.core-test')
+        self.assertIn(':slowest 12', self.sent[-1])
+        for bad in ('51', 'x', '-1'):
+            receipt, code, _ = self.invoke_check({}, '--slowest', bad, 'check', 'a.core-test')
+            self.assertEqual(('unknown', 2), (receipt['status'], code), bad)
+            self.assertIn('--slowest', receipt['error'])
+
+    # INTENT-TEST: LOOP-RECEIPT-LOAD-SLOWEST-006
+    def test_the_load_line_flags_a_busy_machine_and_an_unknown_load(self):
+        busy = cli.render_load_line({'load_1m': 40.0, 'cpus': 8, 'per_core': 5.0, 'load_1m_end': 41.0})
+        self.assertEqual('test-focus: load 40.0 on 8 cpus (5.0/core), 41.0 at end '
+                         '[busy: timings measure the machine]\n', busy)
+        self.assertEqual('test-focus: load unknown\n', cli.render_load_line({'load_1m': None, 'cpus': 8}))
+        failed = cli.render_check(dict(RenderFailuresTest.RECEIPT, load_1m=1.0, cpus=8, per_core=0.12))
+        self.assertTrue(failed.startswith('test-focus: load 1.0 on 8 cpus (0.12/core)\ntest-focus: FAIL'),
+                        'the load line comes first, then the failure block')
+
+
+class RepeatTest(ScriptedCheckTest):
+    A, B = 'a.core-test/steady', 'a.core-test/wobbly'
+
+    # INTENT-TEST: LOOP-REPEAT-007
+    def test_a_test_that_passes_and_fails_across_runs_is_flaky(self):
+        loop = self.loop(run_receipt('pass', timing(self.A), timing(self.B)),
+                         run_receipt('fail', timing(self.A), timing(self.B, 'fail'),
+                                     failures=[{'kind': 'fail', 'test': self.B}]),
+                         run_receipt('pass', timing(self.A), timing(self.B)))
+        receipt = loop.command('check', ['a.core-test'], {'repeat': 3})
+        rep = receipt['repeat']
+        self.assertEqual(('fail', 'flaky'), (receipt['status'], rep['verdict']))
+        self.assertEqual([{'test': self.B, 'runs': 3, 'pass': 2, 'fail': 1, 'error': 0, 'verdict': 'flaky'},
+                          {'test': self.A, 'runs': 3, 'pass': 3, 'fail': 0, 'error': 0, 'verdict': 'stable-pass'}],
+                         rep['tally'], 'flaky rows first')
+        self.assertEqual((3, 3, 1, 0, 1), (rep['requested'], rep['runs'], rep['flaky'], rep['stable_fail'],
+                                           rep['stable_pass']))
+        self.assertEqual(self.B, receipt['failures'][0]['test'], 'top-level fields are the first failing run')
+        self.assertEqual('/r/fail.edn', receipt['path'])
+        self.assertNotIn('test-timings', receipt, 'per-run timings are folded into the tally')
+        self.assertIn(':reload true', self.sent[0])
+        self.assertTrue(all(':reload false' in s and ':timings true' in s for s in self.sent[1:]),
+                        'only the first run reloads when no file changes')
+        self.assertEqual([True, False, False], [r['reloaded'] for r in rep['per_run']])
+        self.assertFalse(loop.taint.exists())
+        text = cli.render_repeat(receipt)
+        self.assertIn('test-focus: REPEAT 3 of 3 runs -- flaky (1 flaky, 0 stable-fail, 1 stable-pass)', text)
+        self.assertIn('  flaky       a.core-test/wobbly  2/3 pass', text)
+        self.assertNotIn('steady', text, 'stable passes are counted, not listed')
+
+    # INTENT-TEST: LOOP-REPEAT-007
+    def test_every_run_passing_is_stable_pass_and_every_run_failing_is_stable_fail(self):
+        ok = self.loop(*[run_receipt('pass', timing(self.A))] * 4).command('check', ['a.core-test'], {'repeat': 4})
+        self.assertEqual(('pass', 'stable-pass', 4), (ok['status'], ok['repeat']['verdict'], ok['repeat']['runs']))
+        bad = self.loop(*[run_receipt('fail', timing(self.A), timing(self.B, 'error'))] * 2).command(
+            'check', ['a.core-test'], {'repeat': 2})
+        self.assertEqual(('fail', 'stable-fail'), (bad['status'], bad['repeat']['verdict']))
+        self.assertEqual({'test': self.B, 'runs': 2, 'pass': 0, 'fail': 0, 'error': 2, 'verdict': 'stable-fail'},
+                         bad['repeat']['tally'][0])
+
+    # INTENT-TEST: LOOP-REPEAT-007
+    def test_a_file_change_between_runs_reloads_and_makes_the_result_stale(self):
+        src = self.root / 'src'
+        src.mkdir()
+
+        def edit(call):
+            if call == 1:
+                (src / 'a.clj').write_text('(ns a)')
+        loop = self.loop(*[run_receipt('pass', timing(self.A))] * 3, on_call=edit)
+        receipt = loop.command('check', ['a.core-test'], {'repeat': 3})
+        self.assertEqual('stale', receipt['status'])
+        self.assertTrue(receipt['repeat']['source_changed'])
+        self.assertEqual('stale', receipt['repeat']['per_run'][0]['status'], 'run 1 saw its files change')
+        self.assertEqual('stable-pass', receipt['repeat']['verdict'], 'a stale run is not a flake')
+        self.assertEqual([True, True, False], [r['reloaded'] for r in receipt['repeat']['per_run']],
+                         'an edit during run 1 is reloaded before run 2, then not again')
+
+    # INTENT-TEST: LOOP-REPEAT-007
+    def test_a_change_between_runs_triggers_a_reload(self):
+        src = self.root / 'src'
+        src.mkdir()
+        loop = self.loop(*[run_receipt('pass', timing(self.A))] * 3)
+        original = loop.run_once
+
+        def run_once(*args):
+            result = original(*args)
+            if len(self.sent) == 1:
+                (src / 'a.clj').write_text('(ns a)')   # edited after run 1 finished
+            return result
+        loop.run_once = run_once
+        receipt = loop.command('check', ['a.core-test'], {'repeat': 3})
+        self.assertEqual([True, True, False], [r['reloaded'] for r in receipt['repeat']['per_run']])
+        self.assertEqual('stale', receipt['status'], 'the tally spans two versions of the code')
+        self.assertIn('source files changed between runs', cli.render_repeat(receipt))
+
+    # INTENT-TEST: LOOP-REPEAT-007
+    def test_a_run_without_test_results_stops_the_repeat(self):
+        reload_fail = {'status': 'fail', 'stage': 'reload', 'error': 'EOF', 'jvm-usable': True,
+                       'failures': [{'kind': 'load', 'test': 'a.core'}]}
+        loop = self.loop(run_receipt('pass', timing(self.A)), reload_fail, run_receipt('pass', timing(self.A)))
+        receipt = loop.command('check', ['a.core-test'], {'repeat': 3})
+        self.assertEqual(('fail', 'reload', 'incomplete'), (receipt['status'], receipt['stage'],
+                                                            receipt['repeat']['verdict']))
+        self.assertEqual(2, len(self.sent), 'no third run after a broken one')
+        unknown = self.loop({'status': 'unknown', 'stage': 'probe'}).command('check', ['a.core-test'], {'repeat': 5})
+        self.assertEqual(('unknown', 'incomplete'), (unknown['status'], unknown['repeat']['verdict']))
+        self.assertTrue((self.run_dir / 'tainted').exists(), 'a non-terminal run still taints')
+
+    # INTENT-TEST: LOOP-REPEAT-007
+    def test_repeat_is_bounded(self):
+        for bad in (0, 51):
+            with self.assertRaisesRegex(RuntimeError, '--repeat must be a whole number from 1 to 50'):
+                self.loop().command('check', ['a.core-test'], {'repeat': bad})
+        self.assertEqual([], self.sent)
+        receipt = self.loop(run_receipt('pass', timing(self.A))).command('check', ['a.core-test'], {'repeat': 1})
+        self.assertNotIn('repeat', receipt, 'one run is an ordinary check')
+        self.assertIn(':timings false', self.sent[0])
+
+
+class PerfModeTest(ScriptedCheckTest):
+    # INTENT-TEST: LOOP-PERF-MODE-008
+    def test_perf_may_name_no_namespace_and_asks_the_runner_for_perf_tests(self):
+        answer = run_receipt('pass', timing('a.render-test/big', ms=900.0))
+        answer['perf-tests'] = answer.pop('test-timings')
+        receipt = self.loop(answer).command('check', [], {'perf': True})
+        self.assertEqual('pass', receipt['status'])
+        self.assertIn('/check! [] {:reload true :perf true', self.sent[0])
+        self.assertEqual('test-focus: PERF -- 1 timing tests\n       900.0 ms  pass    a.render-test/big\n',
+                         cli.render_perf(receipt))
+        with self.assertRaisesRegex(RuntimeError, 'test namespaces'):
+            self.loop().command('check', [], {})
+
+    # INTENT-TEST: LOOP-PERF-MODE-008
+    def test_no_perf_tests_is_a_focus_refusal_that_keeps_the_jvm_warm(self):
+        loop = self.loop({'status': 'fail', 'stage': 'focus', 'error': 'no ^:perf test vars in: a.core-test',
+                          'perf-selected': []})
+        receipt = loop.command('check', ['a.core-test'], {'perf': True})
+        self.assertEqual('focus', receipt['stage'])
+        self.assertFalse(loop.taint.exists())
+        self.assertIn('no ^:perf test vars', cli.render_check(receipt))
+
+
+class TestFocusOptionsTest(unittest.TestCase):
+    def run_focus(self, *args):
+        with tempfile.TemporaryDirectory() as tmp:
+            focus, log = fake_focus(tmp, '{"status": "ready"}')
+            done = subprocess.run([focus, *args], capture_output=True, text=True, timeout=30)
+            return done, log.read_text().splitlines()
+
+    # INTENT-TEST: LOOP-REPEAT-007
+    def test_repeat_and_slowest_reach_only_the_check(self):
+        done, calls = self.run_focus('--repeat', '3', 'a.core-test', '--slowest', '9')
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertEqual(['status', '--repeat 3 --slowest 9 check a.core-test'], calls)
+
+    # INTENT-TEST: LOOP-PERF-MODE-008
+    def test_perf_prints_the_load_first_and_needs_no_namespace(self):
+        done, calls = self.run_focus('--perf')
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertEqual(['status', '--perf check'], calls)
+        first = done.stderr.splitlines()[0]
+        self.assertRegex(first, r'^test-focus: --perf; load averages [0-9.]+[ ,]+[0-9.]+[ ,]+[0-9.]+ on \d+ cpus, before the run$')
+        refused = subprocess.run([str(SCRIPT.parent / 'test-focus')], capture_output=True, text=True, timeout=30)
+        self.assertEqual(2, refused.returncode)
+        self.assertIn('(or use --perf)', refused.stderr)

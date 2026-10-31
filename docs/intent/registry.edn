@@ -175,4 +175,36 @@
    :tests [:a-reload-syntax-error-is-reported-and-the-next-reload-repairs-it :only-a-vm-error-makes-the-jvm-unusable
            :test_a_reload_failure_in_a_usable_jvm_is_reported_and_keeps_it_warm :test_an_unhealthy_jvm_still_taints
            :test_a_reload_failure_is_never_a_pass :test_a_failed_dependency_scan_keeps_the_jvm_warm]
-   :rationale "ks-9p5, 2026-10-31: a reload syntax error tainted the runner, so the next check paid a ~12 s cold start."}]}
+   :rationale "ks-9p5, 2026-10-31: a reload syntax error tainted the runner, so the next check paid a ~12 s cold start."}
+  {:id :LOOP-RECEIPT-LOAD-SLOWEST-006 :status :active
+   :ears "Every warm check receipt (stdout and the wrapper receipt) shall carry the 1-minute load average, the CPU count and the load per core at the start of the check, the 1-minute load at its end, and slowest: the N (default 5, 0-50) slowest test vars that ran, each with its duration in ms and outcome; the stderr block shall start with one line giving the load and the slowest test. Existing fields keep their names and meanings."
+   :misreadings ["A timing means the same at load 5 and load 160." "Only perf runs need the load." "Slowest is a separate profiling run."]
+   :boundaries ["Passing check" "Failing check" "Refused check (no runner call)" "Unreadable load" "Load above 1.5 per core" "Skipped and untimed vars" "Fewer vars than N" "N = 0"]
+   :tests [:test-timings-name-each-var-with-its-duration-and-outcome
+           :test_a_check_receipt_records_load_at_start_and_end_and_the_slowest_tests
+           :test_a_refused_check_still_records_the_load :test_slowest_n_is_passed_to_the_runner_and_bounded
+           :test_the_load_line_flags_a_busy_machine_and_an_unknown_load]
+   :rationale "ks-216, 2026-10-31: timings were uninterpretable without hand-run uptime checks; the load ranged from 5 to 160 in one day."}
+  {:id :LOOP-REPEAT-007 :status :active
+   :ears "When a warm check is given --repeat N (1-50), the loop shall run the same selection N times in the same JVM, reloading before the first run and before any later run whose source fingerprint differs from the last reload, and shall report in repeat a per-test tally (runs, pass, fail, error) with a verdict per test and overall: stable-pass, stable-fail or flaky; it shall stop early with verdict incomplete when a run gives no per-test result, and shall report stale when files changed during the repeat. Top-level fields shall describe the first run that did not pass, else the last run."
+   :misreadings ["Each repeat run needs its own reload." "An edit during a run is picked up by the next run without a reload." "A stale run is a flake." "N is unbounded."]
+   :boundaries ["All pass" "All fail" "Mixed" "Edit during a run" "Edit between runs" "Reload failure mid-repeat" "Non-terminal run" "N = 1, 0, 51"]
+   :tests [:a-repeat-run-can-skip-the-reload
+           :test_a_test_that_passes_and_fails_across_runs_is_flaky
+           :test_every_run_passing_is_stable_pass_and_every_run_failing_is_stable_fail
+           :test_a_file_change_between_runs_reloads_and_makes_the_result_stale
+           :test_a_change_between_runs_triggers_a_reload :test_a_run_without_test_results_stops_the_repeat
+           :test_repeat_is_bounded :test_repeat_and_slowest_reach_only_the_check]
+   :rationale "ks-mn0, 2026-10-31: proving a flake fixed took hand-written loops (3/3 warm, then the cold gate twice)."}
+  {:id :LOOP-PERF-MODE-008 :status :active
+   :ears "When a warm check is given --perf, it shall run only the test vars tagged ^:perf in the named namespaces or vars (in every test namespace of the default suite when none is named), un-skipping :perf from tests.edn's skip-meta, never fail-fast, and report each one's duration and outcome in perf-tests; test-focus shall print the load average before the run starts. A selection with no ^:perf var shall be refused by name at stage focus without tainting the runner."
+   :misreadings ["focus-meta [:perf] alone selects perf tests (it is OR-ed with the namespace focus)." "skip-meta [:perf] in tests.edn hides them from a perf run." "A global fail-fast stops at the first slow test."]
+   :boundaries ["Namespaces named" "None named" "A ^:perf var target" "An untagged var target" "No perf tests" "skip-meta at top level and per suite"]
+   :tests [:perf-vars-are-the-perf-tagged-test-vars-of-the-targets
+           :a-perf-run-unskips-perf-at-the-top-level-and-in-every-suite
+           :with-no-namespace-named-perf-mode-takes-the-default-suites-test-namespaces
+           :a-perf-check-without-perf-tests-is-refused-by-name
+           :test_perf_may_name_no_namespace_and_asks_the_runner_for_perf_tests
+           :test_no_perf_tests_is_a_focus_refusal_that_keeps_the_jvm_warm
+           :test_perf_prints_the_load_first_and_needs_no_namespace]
+   :rationale "ks-wzy, 2026-10-31: promote the SETUP section 14 recipe (:skip-meta/:focus-meta [:perf]) into the tool."}]}
