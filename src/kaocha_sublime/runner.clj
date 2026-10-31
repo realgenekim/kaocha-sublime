@@ -15,6 +15,9 @@
    [clojure.tools.namespace.dependency :as dependency]
    [clojure.tools.namespace.dir :as scan]
    [clojure.tools.namespace.track :as track]
+   [kaocha.hierarchy :as hierarchy]
+   [kaocha.testable :as testable]
+   [kaocha-sublime.agent :as agent]
    [kaocha-sublime.probe :as probe]
    [nrepl.server :as nrepl]))
 
@@ -95,18 +98,152 @@
        distinct
        vec))
 
+;; ---------------------------------------------------------------- failure details
+
+(def failure-limit
+  "At most this many failure entries per receipt; the rest are counted in
+  :failures-omitted."
+  10)
+(def value-limit "Characters kept of expected, actual, expr and message." 600)
+(def output-limit "Characters kept from the END of a test's captured stdout/stderr." 2048)
+
+(defn- clip [^String s limit]
+  (when s (if (> (count s) limit) (str (subs s 0 limit) "...") s)))
+
+(defn- tail [^String s limit]
+  (when (seq s) (if (> (count s) limit) (str "..." (subs s (- (count s) limit))) s)))
+
+(defn bounded-pr-str
+  "pr-str of a test value, bounded so an infinite or deep value cannot hang or
+  flood the receipt. Never throws: an unprintable value becomes <unprintable Class>."
+  [v]
+  (try
+    (binding [*print-length* 40 *print-level* 8 *print-meta* false *print-namespace-maps* false]
+      (clip (pr-str v) value-limit))
+    (catch Throwable _ (str "<unprintable " (.getName (class v)) ">"))))
+
+(defn- throwable-text
+  "Class: message {ex-data}, then each cause, then the first stack frame outside
+  clojure.core/clojure.lang/java/kaocha (where the test code threw)."
+  [^Throwable t]
+  (let [chain (take 6 (take-while some? (iterate #(.getCause ^Throwable %) t)))
+        line (fn [^Throwable e]
+               (str (.getName (class e)) ": " (.getMessage e)
+                    (when-let [d (ex-data e)] (str " " (bounded-pr-str d)))))
+        frame (->> chain (mapcat #(.getStackTrace ^Throwable %))
+                   (remove #(re-find #"^(clojure\.(core|lang|main|test)|java\.|jdk\.|sun\.|kaocha\.|nrepl\.)"
+                                     (.getClassName ^StackTraceElement %)))
+                   first)]
+    (clip (str (str/join " | caused by " (map line chain))
+               (when frame (str " | at " (clojure.lang.Compiler/demunge (.getClassName ^StackTraceElement frame)) " ("
+                                (.getFileName ^StackTraceElement frame) ":"
+                                (.getLineNumber ^StackTraceElement frame) ")")))
+          value-limit)))
+
+(defn- unique-by-name
+  "The one file named like `file` (a bare name, as clojure.test reports a stack
+  frame) under the source dirs, or nil when there is none or more than one."
+  [file]
+  (when (and (string? file) (= file (.getName (io/file file))))
+    (let [hits (->> (source-dirs) (mapcat file-seq)
+                    (filter #(and (.isFile ^java.io.File %) (= file (.getName ^java.io.File %))))
+                    (take 2))]
+      (when (= 1 (count hits)) (.getCanonicalFile ^java.io.File (first hits))))))
+
+(defn- root-relative
+  "The source file of a failure as a path relative to the project root when it is
+  found there: the event's own file, else the var's classpath-relative :file under a
+  source dir, else the one file under the source dirs with the event's bare name.
+  Falls back to whatever the event said."
+  [file meta-file]
+  (let [root (.getCanonicalFile (io/file "."))
+        under-root (fn [f] (let [c (.getCanonicalFile (io/file f))]
+                             (when (.isFile c) c)))
+        same-name? (and (string? file) (string? meta-file)
+                        (= (.getName (io/file file)) (.getName (io/file meta-file))))
+        found (or (when (string? file) (under-root file))
+                  (when (or same-name? (nil? file))
+                    (some #(when (string? meta-file) (under-root (io/file % meta-file))) (source-dirs)))
+                  (unique-by-name file))]
+    (if (and found (str/starts-with? (str found) (str root java.io.File/separator)))
+      (str (.relativize (.toPath root) (.toPath found)))
+      (or file meta-file))))
+
+(defn- failure-entry [node e]
+  (let [id (:kaocha.testable/id node)
+        m (:kaocha.testable/meta node)
+        error? (hierarchy/error-type? e)
+        actual (:actual e)
+        eq (@#'agent/equality-values e)
+        contexts (seq (reverse (:testing-contexts e)))
+        file (root-relative (:file e) (:file m))
+        line (or (:line e) (:line m))
+        line (when (and (integer? line) (pos? line)) line)]
+    ;; array-map keeps this key order in the JSON, for readers scanning by eye.
+    (->> [:kind (cond (:kaocha.testable/load-error node) "load" error? "error" :else "fail")
+          :test (if (and (keyword? id) (namespace id)) (str (namespace id) "/" (name id)) (some-> id name))
+          :at (when file (str file (when line (str ":" line))))
+          :file file
+          :line line
+          :message (or (some-> (:message e) str (clip value-limit))
+                       ;; Kaocha's own failure types carry no message; name them.
+                       (when (hierarchy/isa? (:type e) :kaocha.type.var/zero-assertions)
+                         "Test ran without assertions. Did you forget an (is ...)?")
+                       (when-not (contains? #{:fail :error} (:type e)) (str "failure type " (:type e))))
+          :context (when contexts (clip (str/join " > " contexts) value-limit))
+          :expr (when (and (contains? e :expected) (not error?)) (bounded-pr-str (:expected e)))
+          :expected (cond eq (bounded-pr-str (first eq))
+                          (and (contains? e :expected) (not error?)) (bounded-pr-str (:expected e)))
+          :actual (cond (instance? Throwable actual) (throwable-text actual)
+                        eq (bounded-pr-str (second eq))
+                        (contains? e :actual) (bounded-pr-str actual))
+          :output (tail (:kaocha.plugin.capture-output/output node) output-limit)]
+         (partition 2)
+         (remove (fn [[_ v]] (or (nil? v) (= "" v))))
+         (apply concat)
+         (apply array-map))))
+
+;; INTENT: LOOP-FAILURE-DETAILS-001
+(defn failure-details
+  "Every failing or erroring assertion in a Kaocha result tree, in run order:
+  {:failures [first `failure-limit` entries] :failures-omitted n}. Each entry has
+  :kind :test :at :file :line :message :context :expr :expected :actual :output
+  (blank fields left out). Values are bounded pr-str (`value-limit` chars); :output
+  is the test's captured stdout+stderr, last `output-limit` chars."
+  [result]
+  (let [entries (for [node (testable/test-seq result)
+                      e (:kaocha.testable/events node)
+                      :when (hierarchy/fail-type? e)]
+                  (failure-entry node e))
+        shown (vec (take failure-limit entries))]
+    {:failures shown
+     :failures-omitted (- (count entries) (count shown))}))
+
+;; INTENT: LOOP-VAR-FOCUS-002
+(defn- missing-test-vars
+  "Qualified targets that name no test var once their namespace is loaded."
+  [requested]
+  (vec (for [sym requested
+             :when (namespace sym)
+             :let [v (try (find-var sym) (catch Exception _ nil))]
+             :when (not (and v (:test (meta v))))]
+         (str sym))))
+
 (defn check!
   "Reload the declared dependency closure of the requested namespaces, then run
-  exactly those namespaces through the Sublime probe."
+  exactly those targets through the Sublime probe. A target is a namespace
+  (\"my.app-test\") or one test var (\"my.app-test/adds\"); a var's namespace is
+  reloaded as if it were named."
   [namespaces]
   (locking runner-lock
     (let [requested (mapv symbol namespaces)
+          requested-ns (vec (distinct (map #(symbol (or (namespace %) (name %))) requested)))
           base {:image-identity "unknown" :mode "development-probe"}
           scanned (try
                     (let [tracker (scan/scan-dirs (track/tracker) (source-dirs))
                           graph (::track/deps tracker)
-                          closure (into (set requested)
-                                        (mapcat #(dependency/transitive-dependencies graph %) requested))]
+                          closure (into (set requested-ns)
+                                        (mapcat #(dependency/transitive-dependencies graph %) requested-ns))]
                       {:targets (filterv closure (::track/load tracker))})
                     (catch Throwable t {:error t}))]
       (if-let [t (:error scanned)]
@@ -123,21 +260,32 @@
             ;; can leave the image half-loaded.
             (assoc base :status "fail" :stage "reload" :error (.getMessage ^Throwable reload-error)
                    :reload-targets (mapv str targets))
+            (if-let [missing (seq (missing-test-vars requested))]
+              ;; A typo'd var would focus on nothing and come back "unknown" with zero
+              ;; tests; say exactly which name is wrong instead.
+              (assoc base :status "fail" :stage "focus"
+                     :error (str "no such test var: " (str/join ", " missing))
+                     :reload-targets (mapv str targets))
             (let [result (probe/run requested
                                     {:plugins [:kaocha.plugin/filter :kaocha.plugin/run-receipt]
                                      :kaocha.plugin.run-receipt/dir ".dev-loop/kaocha-runs"
                                      :kaocha.plugin.run-receipt/include-tests? true
                                      :kaocha/fail-fast? false})
                   receipt (when (:path result) (edn/read-string (slurp (:path result))))
-                  counts (:totals receipt)]
-              (assoc base
+                  counts (:totals receipt)
+                  details (try (some-> (:result result) failure-details)
+                               (catch Throwable t
+                                 {:failures [{:kind "error" :test "kaocha-sublime.runner/failure-details"
+                                              :message (str "could not build failure details: " (.getMessage t))}]
+                                  :failures-omitted 0}))]
+              (assoc (merge base (when (seq (:failures details)) details))
                      ;; probe exit 0 already requires complete coverage and >0 tests
                      ;; (protocol/outcome), which subsumes the template's count>0 guard.
                      :status (case (:exit result) 0 "pass" 1 "fail" "unknown")
                      :stage "probe" :exit (:exit result) :path (:path result)
                      :events (:events result) :counts counts
                      :reload-targets (mapv str targets)
-                     :error (some-> ^Throwable (:error result) .getMessage)))))))))
+                     :error (some-> ^Throwable (:error result) .getMessage))))))))))
 
 (defn -main [& _]
   (let [server (nrepl/start-server :bind "127.0.0.1" :port 0)

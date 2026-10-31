@@ -134,4 +134,18 @@
    :misreadings ["Total is the number of requested targets." "Namespace groups count test Vars."]
    :boundaries ["Namespace versus Var focus" "Suites omitted before discovery" "Legacy records without a basis"]
    :tests [:probe-scope-separates-focus-from-declared-skips]
-   :rationale "Item 4b denominator drift, records 50db3993; convention changes require a new basis."}]}
+   :rationale "Item 4b denominator drift, records 50db3993; convention changes require a new basis."}
+  {:id :LOOP-FAILURE-DETAILS-001 :status :active
+   :ears "When a warm check (sublime-loop check / test-focus) fails, its receipt shall carry failures: one entry per failing or erroring assertion with test var, file:line, message, testing context, expression, bounded expected and actual values, and the test's captured stdout/stderr tail; entries beyond the limit shall be counted in failures-omitted, never silently dropped. A readable block of the same shall go to stderr, never stdout."
+   :misreadings ["Counts are enough to act on a red check." "Test output is lost in the warm JVM." "A long value or an infinite seq may hang or flood the receipt."]
+   :boundaries ["Equality assertion" "Uncaught exception with cause" "Huge and infinite values" "Output longer than the limit" "More failures than the limit" "Passing check" "Zero-assertion test" "Bare stack-frame file name"]
+   :tests [:each-failure-names-its-var-location-message-values-and-output :an-error-shows-class-message-data-cause-and-the-throwing-frame
+           :failure-details-are-bounded :a-passing-tree-has-no-failures
+           :kaocha-failure-types-and-bare-stack-files-still-explain-themselves]
+   :rationale "2026-10-31 rating gap: agents dug through .dev-loop/kaocha-runs for failure details and edited a test to write a timing to a file because test stdout was not surfaced."}
+  {:id :LOOP-VAR-FOCUS-002 :status :active
+   :ears "A warm check target may be a namespace or a namespace/test-var; a var target shall reload its namespace's dependency closure exactly as if the namespace were named and run only that var. A target naming no test var shall be refused by name after reload, without running tests and without tainting the runner."
+   :misreadings ["A var target skips reloading its namespace." "A typo'd var is a zero-test unknown that costs a cold restart."]
+   :boundaries ["Var only" "Var mixed with namespace" "Absent var" "Non-test var" "Var names with ? ! * characters"]
+   :tests [:a-var-target-reloads-its-namespace-and-a-missing-var-is-named]
+   :rationale "2026-10-31 rating gap: an agent iterating on one deftest re-ran the whole namespace."}]}

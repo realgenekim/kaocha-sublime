@@ -229,6 +229,7 @@ checks named namespaces in it. Repos call it from here, through a
 ```sh
 sublime-loop --root <dir> up            # boot (or attest) the runner
 sublime-loop --root <dir> check NS...   # reload the dependency closure, run NS
+sublime-loop --root <dir> check NS/VAR  # same, but run only that test var
 sublime-loop --root <dir> status
 sublime-loop --root <dir> down
 ```
@@ -241,6 +242,10 @@ nrepl, tools.namespace, `-m kaocha-sublime.runner`), so no repo alias names the 
 `{state_dir}` expands to `<root>/.dev-loop`. Every command prints one
 `dev-loop.v1` JSON receipt and writes it to `result-<uuid>.json` and
 `last-result.json`. Exit 0 = ready/stopped/pass, 1 = fail/stale/tainted, 2 = unknown.
+A failed `check` receipt carries `failures` (each failing assertion: test var, `file:line`,
+message, `testing` context, expression, bounded `expected`/`actual`, and the test's captured
+stdout/stderr tail) and `failures-omitted`, and prints a readable block of the same on
+stderr after the JSON line. Field reference: docs/SETUP.md section 7.
 
 A repo needs no alias for the library. An optional `:sublime` alias carries only
 project extras (for example `:extra-paths ["dev"]`); see docs/SETUP.md. `bin/warm-jvm`

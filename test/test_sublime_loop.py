@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 SCRIPT = Path(__file__).resolve().parent.parent / 'bin' / 'sublime-loop'
 
@@ -66,7 +66,7 @@ class Workspace(unittest.TestCase):
 
     def invoke(self, *args):
         out = io.StringIO()
-        with redirect_stdout(out):
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
             code = cli.main(['--root', str(self.root), *args])
         return json.loads(out.getvalue().strip().splitlines()[-1]), code
 
@@ -330,6 +330,125 @@ class TestFocusRootTest(unittest.TestCase):
             self.assertNotIn('COLD START', done.stderr)
             self.assertIn('not a Clojure project root', done.stdout)
             self.assertFalse((base / 'nope').exists())
+
+
+class CheckTargetTest(Workspace):
+    """check accepts namespaces and ns/test-var targets; failures come from the runner."""
+
+    def loop(self, value):
+        loop = cli.Loop(self.root, ':test', {}, False)
+        session = dict(record(self.root, os.getpid()), aliases=':test',
+                       environment=cli.environment_fingerprint(self.root))
+        loop.load_session = lambda: (session, None)
+        self.sent = []
+        loop.evaluate = lambda session, expression: self.sent.append(expression) or dict(value)
+        return loop
+
+    def test_namespace_and_var_targets_are_accepted(self):
+        for name in ('a.core-test', 'a.core-test/adds', 'a.core-test/odd-name?', 'a.b_c-test/x->y!*',
+                     "a.core-test/prime'"):
+            self.assertTrue(cli.valid_target(name), name)
+        for name in ('a.core-test/', '/adds', 'a.core-test/x/y', '9a.core-test', 'a.core-test/x y', '(evil)'):
+            self.assertFalse(cli.valid_target(name), name)
+
+    def test_var_targets_reach_the_runner_unchanged(self):
+        loop = self.loop({'status': 'pass', 'counts': {'tests': 1}})
+        receipt = loop.command('check', ['a.core-test/adds', 'b.db-test'])
+        self.assertEqual('pass', receipt['status'])
+        self.assertIn('["a.core-test/adds", "b.db-test"]', self.sent[0])
+        self.assertEqual(['a.core-test/adds', 'b.db-test'], receipt['checks'])
+
+    def test_a_malformed_target_is_refused_before_the_runner(self):
+        with self.assertRaisesRegex(RuntimeError, 'test namespaces or test vars'):
+            self.loop({}).command('check', ['a.core-test/x y'])
+        self.assertEqual([], self.sent)
+
+    def test_a_missing_var_refusal_leaves_the_runner_untainted(self):
+        loop = self.loop({'status': 'fail', 'stage': 'focus', 'error': 'no such test var: a.core-test/nope'})
+        receipt = loop.command('check', ['a.core-test/nope'])
+        self.assertEqual('focus', receipt['stage'])
+        self.assertFalse(loop.taint.exists(), 'a typo must not cost a cold restart')
+
+    def test_a_reload_failure_still_taints(self):
+        loop = self.loop({'status': 'fail', 'stage': 'reload', 'error': 'Syntax error'})
+        loop.command('check', ['a.core-test'])
+        self.assertTrue(loop.taint.exists())
+
+    def test_runner_failures_are_kept_and_the_events_fallback_is_not_used(self):
+        events = self.run_dir / 'run.events'
+        events.write_text('FAIL ' + json.dumps({'kind': 'fail', 'test': 'from/events'}) + '\n')
+        runner_failures = [{'kind': 'fail', 'test': 'a.core-test/adds', 'message': 'm', 'output': 'hi\n'}]
+        receipt = self.loop({'status': 'fail', 'counts': {'tests': 1}, 'events': str(events),
+                             'failures': runner_failures, 'failures-omitted': 0}).command('check', ['a.core-test'])
+        self.assertEqual(runner_failures, receipt['failures'])
+
+    def test_an_older_runner_without_failures_falls_back_to_the_events_file(self):
+        events = self.run_dir / 'run.events'
+        events.write_text('FAIL ' + json.dumps({'kind': 'fail', 'test': 'from/events'}) + '\n')
+        receipt = self.loop({'status': 'fail', 'counts': {'tests': 1}, 'events': str(events)}).command(
+            'check', ['a.core-test'])
+        self.assertEqual('from/events', receipt['failures'][0]['test'])
+
+
+class RenderFailuresTest(unittest.TestCase):
+    RECEIPT = {'status': 'fail', 'stage': 'probe', 'path': '/r/run.edn',
+               'counts': {'tests': 4, 'fail': 1, 'error': 1},
+               'failures': [{'kind': 'fail', 'test': 'demo.core-test/adds-wrong', 'at': 'test/demo/core_test.clj:12',
+                             'message': 'maps should match', 'context': 'small numbers',
+                             'expr': '(= {:a 1} {:a 2})', 'expected': '{:a 1}', 'actual': '{:a 2}',
+                             'output': '\n'.join('line %d' % i for i in range(8)) + '\n'},
+                            {'kind': 'error', 'test': 'demo.core-test/throws', 'at': 'test/demo/core_test.clj:16',
+                             'actual': 'clojure.lang.ExceptionInfo: boom\n  multi\n  line'}],
+               'failures-omitted': 3}
+
+    def test_each_failure_gets_a_readable_stanza(self):
+        text = cli.render_failures(self.RECEIPT)
+        self.assertIn('test-focus: FAIL -- 4 tests, 1 fail, 1 error', text)
+        self.assertIn('FAIL demo.core-test/adds-wrong  test/demo/core_test.clj:12', text)
+        self.assertIn('  message:  maps should match', text)
+        self.assertIn('  expected: {:a 1}', text)
+        self.assertIn('  actual:   {:a 2}', text)
+        self.assertIn('ERROR demo.core-test/throws  test/demo/core_test.clj:16', text)
+        self.assertIn('  actual:   clojure.lang.ExceptionInfo: boom multi line', text, 'values are one-liners')
+        self.assertIn('(last 5 of 8 lines)', text)
+        self.assertIn('    | line 7', text)
+        self.assertNotIn('| line 2', text)
+        self.assertIn('3 more failures not shown; see the Kaocha receipt at /r/run.edn', text)
+
+    def test_a_refusal_without_failures_shows_its_error(self):
+        text = cli.render_failures({'status': 'fail', 'stage': 'focus', 'error': 'no such test var: a/b'})
+        self.assertEqual('test-focus: FAIL at stage focus: no such test var: a/b\n', text)
+
+    def test_a_pass_renders_nothing(self):
+        self.assertEqual('', cli.render_failures({'status': 'pass', 'counts': {'tests': 1}}))
+
+
+class TestFocusBlockTest(unittest.TestCase):
+    """test-focus: stdout is exactly the JSON receipt; the readable block follows it on stderr."""
+
+    def test_the_block_goes_to_stderr_after_the_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / 'bin'
+            bin_dir.mkdir()
+            (bin_dir / 'test-focus').write_text((SCRIPT.parent / 'test-focus').read_text())
+            fake = bin_dir / 'sublime-loop'
+            fake.write_text('#!/usr/bin/env bash\n'
+                            'for a in "$@"; do last=$a; done\n'
+                            'case " $* " in\n'
+                            '  *" status "*) echo \'{"status": "ready"}\' ;;\n'
+                            '  *" check "*) echo \'{"status": "fail"}\'; echo "FAIL a.core-test/adds" >&2; exit 1 ;;\n'
+                            'esac\n')
+            for f in (fake, bin_dir / 'test-focus'):
+                f.chmod(0o755)
+            focus = str(bin_dir / 'test-focus')
+            alone = subprocess.run([focus, 'a.core-test/adds'], capture_output=True, text=True, timeout=30)
+            self.assertEqual(1, alone.returncode)
+            self.assertEqual('{"status": "fail"}\n', alone.stdout, 'stdout carries exactly one receipt')
+            self.assertEqual('FAIL a.core-test/adds\n', alone.stderr)
+            merged = subprocess.run(['bash', '-c', '"$0" a.core-test/adds 2>&1', focus],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual('{"status": "fail"}\nFAIL a.core-test/adds\n', merged.stdout,
+                             'the block is the last thing on screen, after the long JSON line')
 
 
 if __name__ == '__main__':

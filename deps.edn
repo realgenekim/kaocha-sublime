@@ -2,6 +2,10 @@
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         lambdaisland/kaocha {:mvn/version "1.91.1392"}}
  :aliases {:test {:jvm-opts ["-Xms64m" "-Xmx512m"]
-                  :extra-deps {org.clojure/data.json {:mvn/version "2.5.1"}}
+                  ;; nrepl + tools.namespace: what kaocha-sublime.runner needs (bin/sublime-loop
+                  ;; RUNNER_DEPS), so runner-test loads in the cold gate too.
+                  :extra-deps {org.clojure/data.json {:mvn/version "2.5.1"}
+                               nrepl/nrepl {:mvn/version "1.3.1"}
+                               org.clojure/tools.namespace {:mvn/version "1.5.0"}}
                   :extra-paths ["test" "fixtures/tiny/src"]
                   :main-opts ["-m" "kaocha-sublime.test-runner"]}}}

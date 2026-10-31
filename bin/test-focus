@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# test-focus -- run named test namespaces in the warm JVM for this project root.
+# test-focus -- run named test namespaces or test vars in the warm JVM for this project root.
 #
 #   test-focus my.app.core-test my.app.db-test
+#   test-focus my.app.core-test/adds-two my.app.db-test     # one var, plus a whole namespace
 #   test-focus --root server2 --aliases :run-tests:dev:test server2.handlers.discover-test
 #
 # Thin wrapper over sublime-loop check. When no warm JVM is up, it is tainted, or its
@@ -9,8 +10,9 @@
 # or restarts the warm JVM, and then runs the check. Every cold start is visible: one per
 # session is the cost of doing business; more than one means the inner loop is being paid
 # for cold. A wrong --root is refused (exit 2) before any JVM starts; a relative --root
-# resolves from anywhere in the checkout. A failing check's receipt carries "failures": the
-# first few failing tests with file:line, expression, expected and actual.
+# resolves from anywhere in the checkout. A failing check's receipt carries "failures": each
+# failing assertion with test var, file:line, message, expected, actual and the test's captured
+# stdout/stderr; a readable block of the same goes to stderr after the JSON line.
 # Exit code is the check's: 0 pass, 1 fail/stale/tainted, 2 unknown.
 # Pass the same --root/--aliases you gave warm-jvm. Docs: docs/SETUP.md in this library.
 set -euo pipefail
@@ -24,7 +26,11 @@ while [ $# -gt 0 ]; do
     *) names+=("$1"); shift ;;
   esac
 done
-[ ${#names[@]} -gt 0 ] || { echo "test-focus: name at least one test namespace" >&2; exit 2; }
+[ ${#names[@]} -gt 0 ] || { echo "test-focus: name at least one test namespace or ns/test-var" >&2; exit 2; }
+# The check's human-readable failure block (stderr) is held until after the JSON line, so it
+# is the last thing on screen rather than buried above one long line.
+block="$(mktemp "${TMPDIR:-/tmp}/test-focus.XXXXXX")"
+trap 'rm -f "$block"' EXIT
 cold() { echo "test-focus: COLD START -- $1; starting the warm JVM (sublime-loop up)" >&2; }
 # Start/restart receipts go to stderr so stdout carries exactly one receipt: the check's.
 up() { "$LOOP" ${flags[@]+"${flags[@]}"} up >&2; }
@@ -41,12 +47,13 @@ case "$status" in
   *'"status": "tainted"'*) cold "warm JVM tainted"; down; up ;;
   *) cold "no warm JVM for this root"; up ;;
 esac
-out="$("$LOOP" ${flags[@]+"${flags[@]}"} check "${names[@]}")" && rc=0 || rc=$?
+out="$("$LOOP" ${flags[@]+"${flags[@]}"} check "${names[@]}" 2>"$block")" && rc=0 || rc=$?
 case "$out" in
   *'runner or dependencies changed'*)
     cold "dependencies, runner or aliases changed"
     down; up
-    out="$("$LOOP" ${flags[@]+"${flags[@]}"} check "${names[@]}")" && rc=0 || rc=$? ;;
+    out="$("$LOOP" ${flags[@]+"${flags[@]}"} check "${names[@]}" 2>"$block")" && rc=0 || rc=$? ;;
 esac
 printf '%s\n' "$out"
+cat "$block" >&2
 exit "$rc"

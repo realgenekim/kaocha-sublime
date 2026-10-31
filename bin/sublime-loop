@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One owned, test-only warm nREPL per Clojure project root (kaocha-sublime.runner).
 
-usage: sublime-loop [--root DIR] [--aliases :a:b] [--env KEY=VALUE ...] up|status|check NS...|down
+usage: sublime-loop [--root DIR] [--aliases :a:b] [--env KEY=VALUE ...] up|status|check NS|NS/VAR...|down
 
 State lives in <root>/.dev-loop/. The project root is --root (default: cwd), never
 this script's location. A relative --root resolves the same from anywhere in a git
@@ -155,6 +155,53 @@ def failure_summary(events_path, limit=FAILURE_LIMIT):
         if len(out) >= limit:
             break
     return out
+
+
+# A check target: a namespace, or one test var in it (my.app-test/adds-two?).
+TARGET = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*(/[A-Za-z0-9_*+!?<>=.'-]+)?")
+
+
+def valid_target(name):
+    return TARGET.fullmatch(name) is not None
+
+
+def one_line(value, limit=200):
+    text = ' '.join(str(value).split())
+    return text if len(text) <= limit else text[:limit] + '...'
+
+
+def render_failures(receipt):
+    """A short human-readable block for a failed check (stderr), so a terminal run is
+    readable without jq: one stanza per failure with test, file:line, message and
+    expected/actual one-liners, plus the last lines of the test's output. '' when the
+    check passed or carried nothing to show."""
+    if receipt.get('status') not in ('fail', 'stale', 'unknown'):
+        return ''
+    out = []
+    counts = receipt.get('counts') or {}
+    failures = receipt.get('failures') or []
+    if counts:
+        out.append('test-focus: %s -- %s tests, %s fail, %s error' % (
+            receipt.get('status', '').upper(), counts.get('tests'), counts.get('fail'), counts.get('error')))
+    if receipt.get('error') and not failures:
+        stage = ' at stage ' + receipt['stage'] if receipt.get('stage') else ''
+        out.append('test-focus: %s%s: %s' % (receipt.get('status', '').upper(), stage,
+                                              one_line(receipt['error'], 600)))
+    for item in failures:
+        out.append('')
+        out.append('%s %s  %s' % (item.get('kind', 'fail').upper(), item.get('test', '?'), item.get('at', '')))
+        for key in ('message', 'context', 'expr', 'expected', 'actual'):
+            if item.get(key):
+                out.append('  %-9s %s' % (key + ':', one_line(item[key])))
+        if item.get('output'):
+            lines = item['output'].rstrip('\n').splitlines()
+            out.append('  output:   (last %d of %d lines)' % (min(5, len(lines)), len(lines)))
+            out.extend('    | ' + one_line(line, 160) for line in lines[-5:])
+    omitted = receipt.get('failures-omitted') or 0
+    if omitted:
+        out.append('')
+        out.append('... %d more failures not shown; see the Kaocha receipt at %s' % (omitted, receipt.get('path')))
+    return '\n'.join(out) + '\n' if out else ''
 
 
 def probe_process(pid):
@@ -376,8 +423,9 @@ class Loop:
         if command == 'status':
             return dict(session, status='tainted' if self.taint.exists() else 'ready')
         if command == 'check':
-            if not names or any(not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]*', n) for n in names):
-                raise RuntimeError('name explicit test namespaces: sublime-loop check project.core-test')
+            if not names or any(not valid_target(n) for n in names):
+                raise RuntimeError('name explicit test namespaces or test vars: sublime-loop check '
+                                   'project.core-test project.db-test/reads-rows')
             if self.taint.exists():
                 raise RuntimeError('test process tainted; restart the owned runner')
             if session.get('environment') != environment_fingerprint(self.root):
@@ -387,16 +435,22 @@ class Loop:
             self.taint.write_text('check in flight; terminal result not yet received\n')
             receipt = self.evaluate(session, '(' + RUNNER_NS + '/check! ' + json.dumps(names) + ')')
             after = fingerprint(self.root)
-            terminal = receipt.get('status') in ('pass', 'fail') and receipt.get('counts') is not None
+            # A focus refusal (a named test var does not exist) comes after a complete
+            # reload and runs nothing, so it leaves a clean image: terminal, untainted.
+            terminal = ((receipt.get('status') in ('pass', 'fail') and receipt.get('counts') is not None)
+                        or (receipt.get('status') == 'fail' and receipt.get('stage') == 'focus'))
             if before != after:
                 receipt['status'] = 'stale'
             if terminal:
                 self.taint.unlink()
             else:
                 self.taint.write_text('probe did not establish a completed test result; restart owned runner\n')
-            failures = failure_summary(receipt.get('events'))
-            if failures:
-                receipt['failures'] = failures
+            # The runner builds full failure details from the live result tree; an
+            # older runner did not, so fall back to the events file summary.
+            if not isinstance(receipt.get('failures'), list):
+                failures = failure_summary(receipt.get('events'))
+                if failures:
+                    receipt['failures'] = failures
             receipt.update(source=before, generation=session['generation'],
                            checks=names, verification_complete=False,
                            proof_pending=['final candidate required gates'])
@@ -458,6 +512,8 @@ def main(argv=None):
         latest.write_text(payload)
         latest.replace(loop.run / 'last-result.json')
         print(json.dumps(receipt))
+        if args.command == 'check':
+            sys.stderr.write(render_failures(receipt))
         if receipt['status'] == 'unknown':
             return 2
         return 0 if receipt['status'] in ('ready', 'stopped', 'pass') else 1

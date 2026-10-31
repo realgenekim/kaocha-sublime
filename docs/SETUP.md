@@ -182,13 +182,58 @@ $KS/bin/test-focus --root server2 --aliases :run-tests:dev:test \
 ```
 
 - Name test namespaces explicitly. Several are allowed, space- or comma-separated.
+- Name one test var as `ns/var` to run only that test, alone or mixed with namespaces:
+  `test-focus my.app.core-test/adds-two my.app.db-test`. The var's namespace (and its
+  source dependencies) reload exactly as if you had named the namespace. A name that is
+  not a test var is refused by name (`status: fail`, `stage: focus`,
+  `error: "no such test var: ..."`) before anything runs, and costs no restart.
 - Each check reloads the requested namespaces and their source dependencies (scanned
-  in `src/` and `test/`), then runs exactly those namespaces through Kaocha.
+  in `src/` and `test/`), then runs exactly the named namespaces and vars through Kaocha.
 - stdout is exactly one JSON receipt. Exit code: `0` pass, `1` fail/stale/tainted,
   `2` unknown.
-- A failing receipt carries `failures`: the first three failing tests, each with `test`,
-  `at` (`file:line`), `expr`, `expected`, `actual` and `context`. No need to open the
-  `events` file for the common case.
+- A failing receipt carries `failures`: one entry per failing or erroring assertion, in
+  run order, at most 10 (the rest are counted in `failures-omitted`). Blank fields are
+  left out:
+
+  | Field | Content |
+  |---|---|
+  | `kind` | `fail`, `error` (uncaught exception) or `load` |
+  | `test` | the test var, `ns/name` |
+  | `at`, `file`, `line` | `file:line` relative to the root, and its parts |
+  | `message` | the assertion message (`(is ... "msg")`), or Kaocha's reason (for example a test with no assertions) |
+  | `context` | the `testing` strings, outer to inner, joined with ` > ` |
+  | `expr` | the asserted form |
+  | `expected`, `actual` | the values as `pr-str`, cut at 600 characters (an `=` assertion shows the two evaluated sides; an error shows class, message, `ex-data`, causes and the first frame in your code) |
+  | `output` | the test's captured stdout and stderr, last 2 KB |
+
+  ```json
+  {"kind": "fail", "test": "demo.core-test/adds-wrong",
+   "at": "test/demo/core_test.clj:12", "file": "test/demo/core_test.clj", "line": 12,
+   "message": "maps should match", "context": "small numbers",
+   "expr": "(= {:a 1, :b [1 2 3]} {:a 1, :b [1 2 4]})",
+   "expected": "{:a 1, :b [1 2 3]}", "actual": "{:a 1, :b [1 2 4]}",
+   "output": "timing: 42 ms\nwarn: on stderr\n"}
+  ```
+
+  `println` in a test is a fine way to see a value: it arrives in `output`.
+- After the JSON line, a failed check prints a readable block on stderr, one stanza per
+  failure, so a plain terminal run needs no `jq`:
+
+  ```text
+  test-focus: FAIL -- 4 tests, 1 fail, 1 error
+
+  FAIL demo.core-test/adds-wrong  test/demo/core_test.clj:12
+    message:  maps should match
+    context:  small numbers
+    expr:     (= {:a 1, :b [1 2 3]} {:a 1, :b [1 2 4]})
+    expected: {:a 1, :b [1 2 3]}
+    actual:   {:a 1, :b [1 2 4]}
+    output:   (last 2 of 2 lines)
+      | timing: 42 ms
+      | warn: on stderr
+  ```
+
+  Parse stdout; never parse the stderr block.
 - `--root` resolves the same from anywhere in the checkout: as given (against the working
   directory), else against the git toplevel. `--root server2` works from the top, from
   inside `server2/` and from a sibling. A root that resolves nowhere is refused with exit 2,
@@ -235,8 +280,10 @@ Every command prints one `dev-loop.v1` JSON receipt and also writes it to
 | `unknown` | The loop itself failed (no JVM, lock timeout, startup failure). | Read `error`. |
 
 Useful fields in a check receipt: `counts` (tests, assertions, pass, fail, error,
-skipped-by-focus), `wall_s` (time for this check), `reload-targets` (namespaces
-reloaded), `path` (Kaocha run receipt, EDN, with failure details), `generation`.
+skipped-by-focus), `failures` and `failures-omitted` (see section 7), `wall_s` (time for
+this check), `reload-targets` (namespaces reloaded), `path` (Kaocha run receipt, EDN),
+`checks` (the targets you named), `generation`. A `fail` with `stage: focus` means a named
+test var does not exist; the JVM stays warm.
 
 ## 10. Troubleshooting
 
@@ -285,7 +332,7 @@ up to 512 MB of heap.
 ```sh
 KS=~/src.local/kaocha-sublime
 $KS/bin/warm-jvm     --root R [--aliases :a:b]           # start (background)
-$KS/bin/test-focus   --root R [--aliases :a:b] NS...      # focused check
+$KS/bin/test-focus   --root R [--aliases :a:b] NS|NS/VAR... # focused check
 $KS/bin/sublime-loop --root R [--aliases :a:b] status     # is it up?
 $KS/bin/sublime-loop --root R down                        # stop
 ```
