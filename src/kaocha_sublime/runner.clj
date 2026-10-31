@@ -25,6 +25,7 @@
    [kaocha-sublime.agent :as agent]
    [kaocha-sublime.probe :as probe]
    [kaocha-sublime.reload :as reload]
+   [kaocha-sublime.stale :as stale]
    [nrepl.server :as nrepl]))
 
 (defonce identity-data
@@ -280,6 +281,164 @@
     (->> [:ns (str ns) :var (str var) :at (when f (str f (when (and (integer? line) (pos? line)) (str ":" line))))]
          (partition 2) (remove (comp nil? second)) (apply concat) (apply array-map))))
 
+;; ---------------------------------------------------------------- stale image
+
+(defn- reload-closure
+  "Reload `targets` in order through `reload/reload!`, with Clojure's stderr copied into
+  `buffer` (and still written to stderr). {:unmapped [..] :kept [..] :dynamic n
+  :nanos <time spent recording and unmapping, outside require>} plus :error
+  {:namespace :error} at the first namespace that fails to reload."
+  [targets files ^java.io.StringWriter buffer]
+  (binding [*err* (stale/tee-writer *err* buffer)]
+    (try
+      (reduce (fn [acc target]
+                (try (let [r (reload/reload! target (get files target))]
+                       (-> acc (update :unmapped into (:unmapped r)) (update :kept into (:kept r))
+                           (update :dynamic + (:dynamic r)) (update :nanos + (:nanos r))))
+                     (catch Throwable t (reduced (assoc acc :error {:namespace target :error t})))))
+              {:unmapped [] :kept [] :dynamic 0 :nanos 0} targets)
+      (finally (.flush ^java.io.Writer *err*)))))
+
+(defn- rel-file [^java.io.File f]
+  (when f
+    (let [root (.getCanonicalFile (io/file "."))
+          c (.getCanonicalFile f)]
+      (if (str/starts-with? (str c) (str root java.io.File/separator))
+        (str (.relativize (.toPath root) (.toPath c)))
+        (str c)))))
+
+(defn- at [file line] (when file (str file (when (and (integer? line) (pos? line)) (str ":" line)))))
+
+(defn- repair-stale-configured?
+  "tests.edn's :kaocha-sublime/repair-stale, read only when a stale image was found."
+  []
+  (try (let [f (io/file "tests.edn")]
+         (when (.isFile f)
+           (true? (:kaocha-sublime/repair-stale (edn/read-string {:default (fn [_ v] v)} (slurp f))))))
+       (catch Throwable _ false)))
+
+(defn- stale-assessment
+  "Checks 1-3 of the stale-image design over the reloaded `targets`."
+  [targets scanned loaded rejected]
+  (let [files (:files scanned)
+        closure (:closure scanned)
+        ;; Check 1 only where a refer can have silently failed to take: a namespace that
+        ;; interned the referred name, which (when the file no longer defines it) is a
+        ;; namespace the reload just unmapped or kept a var in, or one Clojure named in a
+        ;; REJECTED line. Anything else fails loudly at reload (IllegalAccessError,
+        ;; IllegalStateException) or is a stale var Check 3 finds. No ns form is read
+        ;; on a check that unmapped nothing.
+        suspects (into (set (map :ns (concat (:unmapped loaded) (:kept loaded))))
+                       (map (comp symbol :ns) rejected))
+        refers (stale/refer-mismatches (filterv suspects targets) files (set (map :var-object (:kept loaded))))
+        unmapped-at (into {} (map (fn [e] [[(:ns e) (:var e)] (:at (unmapped-entry e))])) (:unmapped loaded))
+        refers (mapv (fn [e]
+                       (let [said (some #(when (and (= (:ns %) (str (:ns e))) (= (:kept %) (str (:ns e) "/" (:sym e))))
+                                           (:line %)) rejected)
+                             was (get unmapped-at [(:ns e) (:sym e)])]
+                         (cond-> e said (assoc :clojure-said said) was (assoc :defined-at was))))
+                     refers)
+        referrers (mapv #(assoc % :in-closure? (contains? closure (:ns %)))
+                        (stale/stale-referrers (map :var-object (:unmapped loaded))))]
+    {:refers refers :referrers referrers}))
+
+(defn- stale-failure [files kind e]
+  (let [file (rel-file (get files (:ns e)))
+        line (when (= kind :refer) (:line e))]
+    (->> [:kind "stale"
+          :test (str (:ns e) "/" (:sym e))
+          :at (at file line) :file file :line line
+          :message
+          (case kind
+            :refer
+            (str (case (:class e)
+                   "refused" (str "the :refer of " (:home e) " from " (:lib e) " did not take: " (:ns e) " interned "
+                                  (:sym e) " itself"
+                                  (when (:clojure-said e) " (Clojure REJECTED the refer)")
+                                  ", so its code still calls the old definition"
+                                  (when (:defined-at e) (str " (was at " (:defined-at e) ")")))
+                   "old-var" (str (:ns e) " maps " (:sym e) " to " (:actual e) ", but its ns form refers " (:expected e))
+                   "missing" (str (:ns e) " refers " (:home e) ", which " (:lib e) " no longer defines (a cold JVM fails to load it)"))
+                 (if (and (= "refused" (:class e)) (:defined-at e))
+                   ;; This reload already unmapped the old definition: the next reload's refer takes.
+                   ". Repair: check again (the old definition is now unmapped), test-focus --repair-stale, or the cold gate."
+                   ". Repair: test-focus --repair-stale, or run the cold gate."))
+            :referrer
+            (str (:ns e) " maps " (:sym e) " to " (:refers e) ", which " (:home e)
+                 "'s file no longer defines (the reload unmapped it). "
+                 (if (:in-closure? e)
+                   "It is in this check's reload closure but kept the mapping (:refer :all and :use never remove a name). Repair: test-focus --repair-stale, or run the cold gate."
+                   (str "It is outside this check's reload closure: name " (:ns e) " in the check, or run the cold gate."))))]
+         (partition 2) (remove (comp nil? second)) (apply concat) (apply array-map))))
+
+(defn- refer-data [e]
+  (->> [:ns (str (:ns e)) :sym (str (:sym e)) :class (:class e) :lib (str (:lib e)) :home (str (:home e))
+        :actual (:actual e) :expected (:expected e) :defined-at (:defined-at e) :clojure-said (:clojure-said e)]
+       (partition 2) (remove (comp nil? second)) (apply concat) (apply array-map)))
+
+(defn- referrer-data [e]
+  (array-map :ns (str (:ns e)) :sym (str (:sym e)) :refers (:refers e) :home (str (:home e))
+             :in-closure? (:in-closure? e)))
+
+;; INTENT: LOOP-STALE-REFER-011
+;; INTENT: LOOP-STALE-REPAIR-012
+(defn- stale-image!
+  "Compare the reloaded image with the files (stale-refer design, Checks 1-3) and, when
+  enabled, repair what lies inside the reload closure: ns-unmap the stale mappings,
+  reload those namespaces again in dependency order and check again; only a clean
+  re-check may pass. Returns {:report <receipt :stale> :failures [stale failure
+  entries] :loaded <loaded, plus the repair reload's results> :repair? bool}."
+  [targets scanned loaded ^java.io.StringWriter buffer opts]
+  (let [started (System/nanoTime)
+        files (:files scanned)
+        lines (stale/reload-lines (str buffer))
+        first-pass (stale-assessment targets scanned loaded (:rejected lines))
+        problems? #(or (seq (:refers %)) (seq (:referrers %)))
+        repair? (and (problems? first-pass)
+                     (if (contains? opts :repair-stale) (true? (:repair-stale opts)) (repair-stale-configured?)))
+        check-nanos (- (System/nanoTime) started)
+        repair (when repair?
+                 (let [t0 (System/nanoTime)
+                       before (into {} (for [e (:refers first-pass)]
+                                         [[(:ns e) (:sym e)] (:actual e)]))
+                       in-closure (filter :in-closure? (:referrers first-pass))
+                       _ (doseq [{n :ns sym :sym} (concat (:refers first-pass) in-closure)]
+                           (when (var? (some-> (find-ns n) (.getMapping sym))) (ns-unmap n sym)))
+                       affected (set (map :ns (concat (:refers first-pass) in-closure)))
+                       again (reload-closure (filterv affected targets) files buffer)
+                       merged (-> loaded (update :unmapped into (:unmapped again)) (update :kept into (:kept again))
+                                  (update :nanos + (:nanos again)) (cond-> (:error again) (assoc :error (:error again))))
+                       recheck (when-not (:error again)
+                                 ;; Every var unmapped this check is still stale, wherever it is still held.
+                                 (stale-assessment targets scanned merged (:rejected (stale/reload-lines (str buffer)))))]
+                   {:loaded merged :recheck recheck
+                    :ms (/ (Math/round (/ (double (- (System/nanoTime) t0)) 1e4)) 100.0)
+                    :repaired (vec (for [e (concat (:refers first-pass) (map #(assoc % :class "referrer") in-closure))
+                                         :let [v (some-> (find-ns (:ns e)) (.getMapping (:sym e)))]]
+                                     (array-map :ns (str (:ns e)) :var (str (:sym e))
+                                                :was (or (get before [(:ns e) (:sym e)]) (:refers e))
+                                                :now (when (var? v) (stale/var-label v)))))}))
+        final (if repair (or (:recheck repair) {:refers [] :referrers []}) first-pass)
+        loaded (if repair (:loaded repair) loaded)
+        defs (vec (concat (map #(assoc (unmapped-entry %) :unmapped true) (:unmapped loaded))
+                          (map #(assoc (unmapped-entry %) :unmapped false) (:kept loaded))))
+        check-ms (/ (Math/round (/ (double (+ check-nanos (:nanos loaded))) 1e4)) 100.0)
+        report (->> [:refers (mapv refer-data (:refers final))
+                     :referrers (mapv referrer-data (:referrers final))
+                     :defs defs
+                     :dynamic (when (pos? (:dynamic loaded)) (:dynamic loaded))
+                     :rejected (not-empty (mapv :line (:rejected lines)))
+                     :reload-warnings (not-empty (:warnings lines))
+                     :repaired (:repaired repair)
+                     :repair-ms (:ms repair)
+                     :check-ms check-ms]
+                    (partition 2)
+                    (remove (fn [[_ v]] (or (nil? v) (and (coll? v) (empty? v)))))
+                    (apply concat) (apply array-map))]
+    {:report report :repair? (boolean repair?) :loaded loaded
+     :failures (vec (concat (map #(stale-failure files :refer %) (:refers final))
+                            (map #(stale-failure files :referrer %) (:referrers final))))}))
+
 ;; ---------------------------------------------------------------- timings
 
 (def slowest-default "How many of the slowest test vars a check receipt names." 5)
@@ -375,6 +534,7 @@
                            closure (into (set requested-ns)
                                          (mapcat #(dependency/transitive-dependencies graph %) requested-ns))]
                        {:targets (if reload (filterv closure (::track/load tracker)) [])
+                        :closure closure
                         :requested requested
                         :files (into {} (map (fn [[f ns]] [ns f])) filemap)})
                      (catch Throwable t {:error t}))
@@ -393,15 +553,19 @@
                ;; Each namespace is reloaded, then the vars its file no longer defines are
                ;; unmapped (never remove-ns), before its dependents reload: a dependent that
                ;; still refers a deleted var fails to load, as it would in a cold JVM.
-               unmapped (volatile! [])
-               reload-error (reduce (fn [_ target]
-                                      (try (let [r (reload/reload! target (get (:files scanned) target))]
-                                             (vswap! unmapped into (:unmapped r)))
-                                           nil
-                                           (catch Throwable t (reduced {:namespace target :error t}))))
-                                    nil targets)
-               base (cond-> base (seq @unmapped) (assoc :unmapped (mapv unmapped-entry @unmapped)))]
-           (if reload-error
+               buffer (java.io.StringWriter.)
+               loaded (reload-closure targets (:files scanned) buffer)
+               ;; INTENT: LOOP-STALE-REFER-011
+               ;; After the whole loop (a mid-loop check would see homes not yet reloaded).
+               image (when (and (not (:error loaded)) (seq targets))
+                       (stale-image! targets scanned loaded buffer opts))
+               loaded (if image (:loaded image) loaded)
+               reload-error (:error loaded)
+               base (cond-> base
+                      (seq (:unmapped loaded)) (assoc :unmapped (mapv unmapped-entry (:unmapped loaded)))
+                      (:report image) (assoc :stale (:report image)))]
+           (cond
+             reload-error
              ;; No counts and never a pass: nothing ran. The failed namespace (and the
              ;; ones after it) keep their previous definitions until the next check, which
              ;; reloads the whole closure again and so repairs them; the JVM stays warm
@@ -418,6 +582,20 @@
                       :not-reloaded (mapv str (drop-while #(not= % (:namespace reload-error)) targets))
                       :jvm-usable (jvm-usable? (:error reload-error))
                       :reload-targets (mapv str targets)))
+
+             (seq (:failures image))
+             ;; Never a pass, never unknown: the image is wrong, not broken, and the runner
+             ;; can name every mapping that differs from the files. The JVM stays warm.
+             (assoc base :status "fail" :stage "stale-image"
+                    :error (str "stale image: " (count (:failures image))
+                                " mapping(s) in the warm JVM do not match the files"
+                                (when-not (:repair? image) "; test-focus --repair-stale can repair those inside the closure"))
+                    :failures (vec (take failure-limit (:failures image)))
+                    :failures-omitted (max 0 (- (count (:failures image)) failure-limit))
+                    :jvm-usable true
+                    :reload-targets (mapv str targets))
+
+             :else
              (let [missing (seq (missing-test-vars requested))
                    selected (when (and perf (not missing)) (perf-vars requested))]
                (cond

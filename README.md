@@ -258,7 +258,11 @@ with one line naming both. `--repeat N` (1-50) reruns the selection N times in t
 tally and a verdict, `stable-pass`, `stable-fail` or `flaky`. `--perf` runs only `^:perf`
 test vars (of the named namespaces, else of every test namespace), never fail-fast, prints
 the load first and lists each duration in `perf-tests`. A definition deleted from a file is
-unmapped from the warm JVM at the next check and listed in `unmapped`. Field reference:
+unmapped from the warm JVM at the next check and listed in `unmapped`; a reload that leaves
+mappings unlike the files (a `:refer` that did not take after a move, a namespace still
+mapping a deleted var) fails at `stage: stale-image` with `kind: stale` failures and a
+`stale` map, never `pass`, and keeps the JVM warm; `--repair-stale` unmaps, reloads and
+re-checks inside the closure. Field reference:
 docs/SETUP.md section 7.
 
 A repo needs no alias for the library. An optional `:sublime` alias carries only

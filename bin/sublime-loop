@@ -380,7 +380,9 @@ def render_failures(receipt):
         out.append('%s %s  %s' % (item.get('kind', 'fail').upper(), item.get('test', '?'), item.get('at', '')))
         for key in ('message', 'context', 'expr', 'expected', 'actual'):
             if item.get(key):
-                out.append('  %-9s %s' % (key + ':', one_line(item[key])))
+                # A stale entry's message is the whole diagnosis and ends with the repair.
+                limit = 400 if item.get('kind') == 'stale' and key == 'message' else 200
+                out.append('  %-9s %s' % (key + ':', one_line(item[key], limit)))
         if item.get('output'):
             lines = item['output'].rstrip('\n').splitlines()
             out.append('  output:   (last %d of %d lines)' % (min(5, len(lines)), len(lines)))
@@ -443,9 +445,33 @@ def render_repeat(receipt):
     return '\n'.join(out) + '\n'
 
 
+# INTENT: LOOP-STALE-REFER-011
+def render_stale(receipt):
+    """One line each for definitions the reload removed (or found stale and kept) without
+    any namespace still mapping them: a warning, the verdict is unchanged."""
+    stale = receipt.get('stale') or {}
+    defs = stale.get('defs') or []
+    out = []
+    removed = [d for d in defs if d.get('unmapped')]
+    kept = [d for d in defs if not d.get('unmapped')]
+    if removed:
+        names = ', '.join('%s/%s' % (d.get('ns'), d.get('var')) for d in removed[:5])
+        more = ' and %d more' % (len(removed) - 5) if len(removed) > 5 else ''
+        out.append('test-focus: unmapped %d definition(s) the files no longer have: %s%s' % (len(removed), names, more))
+    if kept:
+        out.append('test-focus: %d stale definition(s) survive in the warm image (defined by another file, '
+                   'not referenced); see receipt stale.defs' % len(kept))
+    for r in stale.get('repaired') or []:
+        out.append('test-focus: repaired %s/%s: %s -> %s' % (r.get('ns'), r.get('var'), r.get('was') or 'unmapped',
+                                                             r.get('now') or 'unmapped'))
+    return '\n'.join(out) + '\n' if out else ''
+
+
 def render_check(receipt):
-    """The whole stderr block of a check: load line, perf timings, repeat tally, failures."""
-    return render_load_line(receipt) + render_perf(receipt) + render_repeat(receipt) + render_failures(receipt)
+    """The whole stderr block of a check: load line, perf timings, repeat tally, stale image,
+    failures."""
+    return (render_load_line(receipt) + render_perf(receipt) + render_repeat(receipt) + render_stale(receipt)
+            + render_failures(receipt))
 
 
 # INTENT: LOOP-REPEAT-007
@@ -487,11 +513,14 @@ SLOWEST_MAX = 50
 
 
 # INTENT: LOOP-RELOAD-FAILURE-005
+# INTENT: LOOP-STALE-REFER-011
 def reload_failure_is_terminal(receipt):
-    """A check that failed to reload or scan, in a JVM the runner says is still usable,
-    is a terminal fail that leaves the runner warm: the next check reloads the whole
-    closure again and so repairs the namespace that failed."""
-    return (receipt.get('status') == 'fail' and receipt.get('stage') in ('reload', 'dependency-scan')
+    """A check that failed to reload or scan, or found a stale image (mappings that no
+    longer match the files), in a JVM the runner says is still usable, is a terminal fail
+    that leaves the runner warm: the next check reloads the whole closure again (and
+    --repair-stale repairs a stale image inside it)."""
+    return (receipt.get('status') == 'fail'
+            and receipt.get('stage') in ('reload', 'dependency-scan', 'stale-image')
             and receipt.get('jvm-usable') is True)
 
 
@@ -818,12 +847,15 @@ class Loop:
             return self.check(session, names, **(options or {}))
         raise RuntimeError('use up, status, check or down')
 
-    def run_once(self, session, names, reload, perf, slowest, timings):
+    def run_once(self, session, names, reload, perf, slowest, timings, repair_stale=False):
         """One runner check!: taint while in flight, untaint on a terminal result."""
         before = fingerprint(self.root)
         self.taint.write_text('check in flight; terminal result not yet received\n')
         options = '{:reload %s :perf %s :slowest %d :timings %s}' % (
             'true' if reload else 'false', 'true' if perf else 'false', slowest, 'true' if timings else 'false')
+        if repair_stale:
+            # INTENT: LOOP-STALE-REPAIR-012
+            options = options[:-1] + ' :repair-stale true}'
         receipt = self.evaluate(session, '(' + RUNNER_NS + '/check! ' + json.dumps(names) + ' ' + options + ')')
         after = fingerprint(self.root)
         # A focus refusal (a named test var does not exist, or no ^:perf var) comes after
@@ -849,7 +881,7 @@ class Loop:
                 receipt['failures'] = failures
         return receipt, before, after, terminal
 
-    def check(self, session, names, repeat=1, perf=False, slowest=SLOWEST_DEFAULT):
+    def check(self, session, names, repeat=1, perf=False, slowest=SLOWEST_DEFAULT, repair_stale=False):
         if (not names and not perf) or any(not valid_target(n) for n in names):
             raise RuntimeError('name explicit test namespaces or test vars: sublime-loop check '
                                'project.core-test project.db-test/reads-rows')
@@ -863,16 +895,16 @@ class Loop:
             raise RuntimeError('runner or dependencies changed; run sublime-loop down then up')
         self.require_aliases(session)
         if repeat == 1:
-            receipt, before, _, _ = self.run_once(session, names, True, perf, slowest, False)
+            receipt, before, _, _ = self.run_once(session, names, True, perf, slowest, False, repair_stale)
         else:
-            receipt, before = self.repeat(session, names, repeat, perf, slowest)
+            receipt, before = self.repeat(session, names, repeat, perf, slowest, repair_stale)
         receipt.update(source=before, generation=session['generation'],
                        checks=names, verification_complete=False,
                        proof_pending=['final candidate required gates'])
         return receipt
 
     # INTENT: LOOP-REPEAT-007
-    def repeat(self, session, names, n, perf, slowest):
+    def repeat(self, session, names, n, perf, slowest, repair_stale=False):
         """Run the same check n times in this JVM. Only the first run reloads the dependency
         closure, unless the source fingerprint changed since that reload (the probe itself
         always reloads the target test namespaces, so state held there starts fresh). Stops early when a run gives no
@@ -886,7 +918,8 @@ class Loop:
             # Reload when the files differ from those the last reload read, including an
             # edit that landed while the previous run was in flight.
             reload = index == 0 or fingerprint(self.root) != loaded
-            receipt, before, after, terminal = self.run_once(session, names, reload, perf, slowest, True)
+            receipt, before, after, terminal = self.run_once(session, names, reload, perf, slowest, True,
+                                                             repair_stale)
             if first is None:
                 first = before
             if reload:
@@ -933,6 +966,9 @@ def parse(argv):
                              'test namespaces), never fail-fast, with each duration')
     parser.add_argument('--slowest', default=str(SLOWEST_DEFAULT), metavar='N',
                         help='check: name the N slowest test vars in the receipt (0-%d)' % SLOWEST_MAX)
+    parser.add_argument('--repair-stale', action='store_true',
+                        help='check: when the reload leaves a stale image (a refer that did not take, a '
+                             'namespace mapping a deleted var), ns-unmap, reload again and re-check')
     parser.add_argument('command', nargs='?', default='status')
     parser.add_argument('names', nargs='*')
     return parser.parse_args(argv)
@@ -946,6 +982,8 @@ def check_options(args):
             raise RuntimeError('--%s must be a whole number' % key)
         out[key] = int(text)
     out['perf'] = bool(args.perf)
+    if args.repair_stale:
+        out['repair_stale'] = True
     return out
 
 

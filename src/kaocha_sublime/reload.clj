@@ -52,7 +52,8 @@
   caller's referrer sweep and is not printable data."
   [ns-sym before ^java.io.File source]
   (let [ns (find-ns ns-sym)
-        source (some-> source .getCanonicalFile)]
+        ;; A file-system call: made only once a var turns out not to be redefined.
+        source (delay (some-> source .getCanonicalFile))]
     (reduce-kv
      (fn [acc sym m]
        (let [v (when ns (.getMapping ^clojure.lang.Namespace ns sym))]
@@ -61,7 +62,7 @@
                   (identical? m (meta v)))
            (let [entry {:ns ns-sym :var sym :file (:file m) :line (:line m) :var-object v}]
              (cond
-               (file-names? (:file m) source) (do (ns-unmap ns sym) (update acc :unmapped conj entry))
+               (file-names? (:file m) @source) (do (ns-unmap ns sym) (update acc :unmapped conj entry))
                (and (string? (:file m)) (not= "NO_SOURCE_PATH" (:file m))) (update acc :kept conj entry)
                :else (update acc :dynamic inc)))
            acc)))
@@ -72,8 +73,13 @@
 (defn reload!
   "(require ns-sym :reload), then unmap the vars the file used to define and no longer
   does (`unmap-stale!`). Throws what require throws; a failed reload unmaps nothing (a
-  half-evaluated file is not evidence of what it defines)."
+  half-evaluated file is not evidence of what it defines). The result carries :nanos,
+  the time spent recording and unmapping (outside require), so the cost is a fact."
   [ns-sym source]
-  (let [before (interned-meta ns-sym)]
+  (let [t0 (System/nanoTime)
+        before (interned-meta ns-sym)
+        t1 (System/nanoTime)]
     (require ns-sym :reload)
-    (unmap-stale! ns-sym before source)))
+    (let [t2 (System/nanoTime)
+          r (unmap-stale! ns-sym before source)]
+      (assoc r :nanos (+ (- t1 t0) (- (System/nanoTime) t2))))))

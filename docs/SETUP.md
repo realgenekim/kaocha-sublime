@@ -197,6 +197,34 @@ $KS/bin/test-focus --root server2 --aliases :run-tests:dev:test \
   var the file still defines keep their identity. Vars without `:file` metadata (runtime
   `intern`, stubs) are kept. The receipt lists what was removed in `unmapped`, each
   `{"ns", "var", "at"}` (`at` is where the file used to define it).
+- A reload that leaves the image unlike the files fails at `stage: stale-image`, never
+  `pass`, and the JVM stays warm (`jvm-usable: true`). Two cases: a namespace whose `ns`
+  form `:refer`s a name it used to define itself (the move case: Clojure prints
+  `REJECTED: attempt to replace interned var ...`, keeps the old var, and the namespace's
+  code still calls the old body), and a namespace that still maps a var its home's file
+  no longer defines (a `:refer :all`/`:use` inside the closure, or any referrer outside
+  it). Each such mapping is one `failures` entry with `kind: stale`, `test` = `ns/name`,
+  `at` and a `message` that names the repair. The receipt's `stale` map carries the
+  details (section 9). Clojure's own REJECTED line still reaches stderr and is attached to
+  the entry.
+
+  ```text
+  STALE pdfreader.core/render-page  src/pdfreader/core.clj:1
+    message:  pdfreader.core's ns form refers render-page from pdfreader.render, but pdfreader.core interned render-page itself, so Clojure kept that var (Clojure: REJECTED, you must ns-unmap first) and the code compiled against it still calls the old definition, which the file no longer has (was at src/pdfreader/core.clj:214). Repair: test-focus --repair-stale, or run the cold gate.
+  ```
+
+  In the move case the reload has already unmapped the old definition, so simply running
+  the check again also repairs it: the next reload's `:refer` takes and the namespace's
+  code is recompiled against the moved var.
+  `--repair-stale` (or `:kaocha-sublime/repair-stale true` in `tests.edn`) repairs what lies
+  inside the check's reload closure: it `ns-unmap`s the stale mappings, reloads those
+  namespaces again in dependency order and checks again; the check goes on only when the
+  re-check is clean, and `stale.repaired` lists each repair. A referrer outside the closure
+  is never reloaded by repair: name it in the check (it then reloads, and fails at
+  `stage: reload` exactly as a cold JVM would if it still refers a deleted name), or run
+  the cold gate. Repair is off by default. A definition that was removed and that nothing
+  maps is only a warning line: `test-focus: unmapped 1 definition(s) the files no longer
+  have: ...`.
 - stdout is exactly one JSON receipt. Exit code: `0` pass, `1` fail/stale/tainted,
   `2` unknown.
 - A failing receipt carries `failures`: one entry per failing or erroring assertion, in
@@ -341,7 +369,7 @@ Every command prints one `dev-loop.v1` JSON receipt and also writes it to
 |---|---|---|
 | `ready` | JVM is up and attested. | Run checks. |
 | `pass` | Every requested test ran and passed. | Continue. |
-| `fail` | A test failed, or reload/compile failed (`stage` says which: `dependency-scan`, `reload`, `probe`). | Read `error` and the Kaocha receipt at `path`. |
+| `fail` | A test failed, or reload/compile failed, or the reloaded image does not match the files (`stage` says which: `dependency-scan`, `reload`, `stale-image`, `probe`). | Read `error` and the Kaocha receipt at `path`; for `stale-image`, `failures` and `stale`. |
 | `stale` | Source files changed while the check ran. | Run the check again. |
 | `tainted` | A check did not reach a terminal result; the JVM may be half-loaded. | `sublime-loop down`, then `warm-jvm` (or just run `test-focus`). |
 | `stopped` | `down` worked, or a stale session record was archived. | — |
@@ -368,6 +396,19 @@ is never a `pass`. The receipt carries:
 | `failures` | one entry with `kind: load`, `test` = the namespace, `at`, `message` (so the stderr block shows it) |
 | `not-reloaded` | the failed namespace and the ones after it: they keep their previous code until the next check |
 | `jvm-usable` | `true` unless the error says the JVM itself is in trouble (for example `OutOfMemoryError`); only then is the runner tainted |
+
+A `fail` with `stage: stale-image` ran nothing; the JVM stays warm. Every check that
+reloaded carries `stale`, with only the keys that have content:
+
+| Field | Content |
+|---|---|
+| `refers` | declared refers that did not take: `ns`, `sym`, `class` (`refused`, `old-var`, `missing`), `lib`, `home`, `actual`, `expected`, `defined-at` (where the old definition was), `clojure-said` (Clojure's REJECTED line) |
+| `referrers` | namespaces mapping a var its home's file no longer defines: `ns`, `sym`, `refers`, `home`, `in-closure?` |
+| `defs` | definitions the files no longer have: `ns`, `var`, `at`, `unmapped` (`true`: removed by the reload; `false`: kept because another file defined it) |
+| `dynamic` | interned vars with no `:file` (runtime `intern`, stubs) the reload did not redefine: counted, never removed |
+| `rejected`, `reload-warnings` | Clojure's REJECTED and `WARNING: ... already refers to` lines from the reload |
+| `repaired`, `repair-ms` | with `--repair-stale`: each repair (`ns`, `var`, `was`, `now`) and its cost |
+| `check-ms` | time spent recording, unmapping and checking, outside `require` itself |
 
 An `unverified` receipt carries `evidence`: `pid`, `port`, `generation`, `attempts` (each
 with `elapsed_s` and `detail`), `budget` (`timeout_s`, `attempts`, `backoff_s`), `load_1m`,
@@ -468,6 +509,13 @@ A 30 s deadline costs nothing when the condition holds quickly; a 2 s deadline f
 ### After moving functions between namespaces, call through the alias
 
 `(:require [my.render :refer [render-page]])` in a warm JVM keeps the caller bound to the OLD var if the caller's namespace already defined that name. Tests pass warm on stale code and fail cold. Use alias-qualified calls (`render/render-page`) after any move, and point `with-redefs` at the new var. The cold full suite is what catches this; keep it as the commit gate.
+
+The warm loop now detects this case: the check fails at `stage: stale-image` with a `STALE`
+entry naming the namespace and symbol (section 7), and `test-focus --repair-stale` repairs it
+in the same JVM. Why the alias works: an alias-qualified call resolves through the home
+namespace's mapping when the caller compiles, so reloading the caller picks up the new var;
+a `:refer`ed bare name resolves through the caller's own mapping, which is the thing that
+goes stale.
 
 ### Split wall-clock tests out of the commit gate
 

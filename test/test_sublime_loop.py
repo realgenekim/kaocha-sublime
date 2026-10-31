@@ -788,6 +788,52 @@ class ReloadFailureTest(CheckTargetTest):
         self.assertFalse(self.run_dir.joinpath('tainted').exists())
 
 
+class StaleImageTest(CheckTargetTest):
+    STALE = {'status': 'fail', 'stage': 'stale-image', 'jvm-usable': True,
+             'error': 'stale image: 1 mapping(s) in the warm JVM do not match the files',
+             'stale': {'refers': [{'ns': 'a.core', 'sym': 'render', 'class': 'refused', 'lib': 'a.render',
+                                   'home': 'render', 'expected': "#'a.render/render",
+                                   'defined-at': 'src/a/core.clj:214'}],
+                       'defs': [{'ns': 'a.core', 'var': 'render', 'at': 'src/a/core.clj:214', 'unmapped': True}],
+                       'check-ms': 2.1},
+             'failures': [{'kind': 'stale', 'test': 'a.core/render', 'at': 'src/a/core.clj:1',
+                           'message': "a.core's ns form refers render from a.render, but ..."}],
+             'failures-omitted': 0}
+
+    # INTENT-TEST: LOOP-STALE-REFER-011
+    def test_a_stale_image_fail_is_terminal_and_keeps_the_jvm_warm(self):
+        loop = self.loop(self.STALE)
+        receipt = loop.command('check', ['a.core-test'])
+        self.assertEqual('fail', receipt['status'])
+        self.assertEqual('stale-image', receipt['stage'])
+        self.assertFalse(loop.taint.exists(), 'a stale image the runner can name must not cost a cold start')
+        older = self.loop(dict(self.STALE, **{'jvm-usable': None}))
+        older.command('check', ['a.core-test'])
+        self.assertTrue(older.taint.exists(), 'without the runner saying the JVM is usable: tainted')
+
+    # INTENT-TEST: LOOP-STALE-REFER-011
+    def test_stale_entries_render_like_failures(self):
+        text = cli.render_check(dict(self.STALE, load_1m=1.0, cpus=8, per_core=0.13))
+        self.assertIn('STALE a.core/render  src/a/core.clj:1', text)
+        self.assertIn("message:  a.core's ns form refers render from a.render", text)
+        self.assertIn('test-focus: unmapped 1 definition(s) the files no longer have: a.core/render', text)
+        clean = cli.render_stale({'status': 'pass', 'stale': {'check-ms': 1.2}})
+        self.assertEqual('', clean, 'a clean image adds no line')
+
+    # INTENT-TEST: LOOP-STALE-REPAIR-012
+    def test_repair_stale_reaches_the_runner_only_when_asked(self):
+        loop = self.loop({'status': 'pass', 'counts': {'tests': 1}})
+        loop.command('check', ['a.core-test'])
+        loop.command('check', ['a.core-test'], {'repair_stale': True})
+        self.assertNotIn('repair-stale', self.sent[0])
+        self.assertIn(':repair-stale true}', self.sent[1])
+        self.assertEqual({'repeat': 1, 'slowest': 5, 'perf': False, 'repair_stale': True},
+                         cli.check_options(cli.parse(['--repair-stale', 'check', 'a.core-test'])))
+        text = cli.render_stale({'stale': {'repaired': [{'ns': 'a.core', 'var': 'render', 'was': None,
+                                                         'now': "#'a.render/render"}]}})
+        self.assertEqual("test-focus: repaired a.core/render: unmapped -> #'a.render/render\n", text)
+
+
 # ---------------------------------------------------------------- ks-216, ks-mn0, ks-wzy
 
 def timing(test, outcome='pass', ms=1.0):
@@ -1023,6 +1069,12 @@ class TestFocusOptionsTest(unittest.TestCase):
         done, calls = self.run_focus('--repeat', '3', 'a.core-test', '--slowest', '9')
         self.assertEqual(0, done.returncode, done.stderr)
         self.assertEqual(['status', '--repeat 3 --slowest 9 check a.core-test'], calls)
+
+    # INTENT-TEST: LOOP-STALE-REPAIR-012
+    def test_repair_stale_reaches_only_the_check(self):
+        done, calls = self.run_focus('--repair-stale', 'a.core-test')
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertEqual(['status', '--repair-stale check a.core-test'], calls)
 
     # INTENT-TEST: LOOP-PERF-MODE-008
     def test_perf_prints_the_load_first_and_needs_no_namespace(self):

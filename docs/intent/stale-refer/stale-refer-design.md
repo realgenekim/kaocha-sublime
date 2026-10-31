@@ -3,7 +3,7 @@ parent: high-level-design
 topic: stale-refer
 bead: ks-2gv
 intents: [LOOP-STALE-REFER-011, LOOP-STALE-REPAIR-012]
-status: proposed
+status: implemented
 ---
 
 # Stale refers: a warm image whose mappings no longer match the files
@@ -183,6 +183,29 @@ IDs continue after `LOOP-PERF-MODE-008`, which uncommitted code in the working t
  :tests [:repair-unmaps-reloads-and-passes-only-when-the-recheck-is-clean]
  :rationale "Clojure's own message names ns-unmap as the repair; it costs milliseconds where a cold start costs 12-35 s on pdfreader. An unverified repair would be a second route to a false green, so the re-check gates the verdict."}
 ```
+
+## Implementation notes (2026-10-31)
+
+- **Ground truth for Check 2 is metadata identity, not a tag.** Before each reload the
+  runner records every interned var's metadata map (`kaocha-sublime.reload/interned-meta`);
+  a var whose map is the same object afterwards was not redefined. Same exactness as the
+  `::gen` tag (the compiler's `def` always installs a fresh map; verified for `defn def
+  declare defonce defmulti defprotocol defrecord`), without writing to user metadata.
+- **Stale definitions are unmapped by the reload itself** (LOOP-RELOAD-UNMAP-013, which
+  supersedes AGENT-PROBE-RELOAD-017): a var the file no longer defines is gone before its
+  dependents reload, so a dependent that still refers it fails to load as it would cold.
+  `stale.defs` lists them with `unmapped: true`; a var another file defined is kept
+  (`unmapped: false`). Check 3 sweeps for the unmapped vars.
+- **Check 1 runs only on suspect namespaces** (one the reload unmapped or kept a var in, or
+  one named in a REJECTED line). A refer is refused silently only when the namespace
+  interns the name; if the file still defines it, cold ends the same way (refer, then the
+  defn replaces it), so it is not stale; otherwise the reload just unmapped or kept that
+  var. A check that unmapped nothing reads no `ns` form. Parsed `ns` forms are cached by
+  file path, size and mtime.
+- **Measured** (generated 100-namespace project, 2,600 vars, load 15-28 on 8 cores):
+  recording and unmapping 2.2-3.0 ms per check (median of 15), inside a 0.9-1.1 s reload
+  loop whose own noise is larger; the referrer sweep (only when something was unmapped)
+  2.6-3.8 ms over 222 namespaces. `stale.check-ms` reports the cost per check.
 
 ## Open questions
 
