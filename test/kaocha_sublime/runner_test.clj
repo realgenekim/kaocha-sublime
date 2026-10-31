@@ -1,5 +1,6 @@
 (ns kaocha-sublime.runner-test
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [kaocha-sublime.runner :as runner]))
 
@@ -116,3 +117,48 @@
     (is (= "Test ran without assertions. Did you forget an (is ...)?" (:message zero)))
     (is (= "src/kaocha_sublime/runner.clj:9" (:at error))
         "a bare stack-frame file name resolves to the one source file with that name")))
+
+;; INTENT-TEST: LOOP-RELOAD-FAILURE-005
+(deftest a-reload-syntax-error-is-reported-and-the-next-reload-repairs-it
+  ;; A transient source file under test/ (deleted in finally, so a warm check's
+  ;; before/after source fingerprint is unchanged). The target names an absent var, so
+  ;; each check stops at the focus refusal after a complete reload: no nested Kaocha run.
+  (let [f (io/file "test/kaocha_sublime/reload_fixture.clj")
+        target ["kaocha-sublime.reload-fixture/absent"]
+        value #(deref (resolve 'kaocha-sublime.reload-fixture/value))]
+    (try
+      (spit f "(ns kaocha-sublime.reload-fixture)\n(def value 1)\n")
+      (is (= "focus" (:stage (runner/check! target))) "the clean namespace loads")
+      (is (= 1 (value)))
+      (spit f "(ns kaocha-sublime.reload-fixture)\n(def value 2)\n(def broken (\n")
+      (let [r (runner/check! target)
+            failure (:reload-failure r)]
+        (is (= "fail" (:status r)) "a failed reload is never a pass")
+        (is (= "reload" (:stage r)))
+        (is (nil? (:counts r)) "nothing ran")
+        (is (true? (:jvm-usable r)) "one bad namespace does not make the JVM unusable")
+        (is (= {:namespace "kaocha-sublime.reload-fixture"
+                :at "test/kaocha_sublime/reload_fixture.clj:4"
+                :file "test/kaocha_sublime/reload_fixture.clj" :line 4 :phase "read-source"}
+               (select-keys failure [:namespace :at :file :line :phase])))
+        (is (str/includes? (:message failure) "EOF while reading"))
+        (is (= "reload of kaocha-sublime.reload-fixture failed at test/kaocha_sublime/reload_fixture.clj:4: "
+               (subs (:error r) 0 (- (count (:error r)) (count (:message failure))))))
+        (is (= [{:kind "load" :test "kaocha-sublime.reload-fixture"
+                 :at "test/kaocha_sublime/reload_fixture.clj:4"}]
+               (mapv #(select-keys % [:kind :test :at]) (:failures r))))
+        (is (= ["kaocha-sublime.reload-fixture"] (:not-reloaded r))))
+      (spit f "(ns kaocha-sublime.reload-fixture)\n(def value 3)\n")
+      (let [r (runner/check! target)]
+        (is (= "focus" (:stage r)) "the next check reloads the closure again")
+        (is (nil? (:reload-failure r)))
+        (is (= 3 (value)) "and the stale namespace is repaired in the same JVM"))
+      (finally
+        (.delete f)
+        (remove-ns 'kaocha-sublime.reload-fixture)))))
+
+;; INTENT-TEST: LOOP-RELOAD-FAILURE-005
+(deftest only-a-vm-error-makes-the-jvm-unusable
+  (is (runner/jvm-usable? (ex-info "Syntax error" {} (RuntimeException. "EOF"))))
+  (is (not (runner/jvm-usable? (RuntimeException. "load" (OutOfMemoryError. "heap")))))
+  (is (not (runner/jvm-usable? (StackOverflowError.)))))

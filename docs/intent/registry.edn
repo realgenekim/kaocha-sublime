@@ -148,4 +148,31 @@
    :misreadings ["A var target skips reloading its namespace." "A typo'd var is a zero-test unknown that costs a cold restart."]
    :boundaries ["Var only" "Var mixed with namespace" "Absent var" "Non-test var" "Var names with ? ! * characters"]
    :tests [:a-var-target-reloads-its-namespace-and-a-missing-var-is-named]
-   :rationale "2026-10-31 rating gap: an agent iterating on one deftest re-ran the whole namespace."}]}
+   :rationale "2026-10-31 rating gap: an agent iterating on one deftest re-ran the whole namespace."}
+  {:id :LOOP-PROBE-UNVERIFIED-003 :status :active
+   :ears "When the recorded warm JVM for a root is alive and owns its recorded port but an nREPL identity probe gives no answer, the loop shall retry with a wait and attempt count scaled to the 1-minute load per core (bounded inside the lock wait), accept a late answer to an earlier probe, and otherwise report status unverified with the evidence (pid, port, generation, attempts, load); it shall never archive the record, report ready, or start a second JVM for that root, and test-focus shall say UNVERIFIED, not COLD START. down shall still stop the owned runner."
+   :misreadings ["A timed-out probe means the JVM is gone." "A fixed 8 s wait is enough on any machine." "Any loop error is cured by a cold start."]
+   :boundaries ["Idle machine" "Load 70 on 8 cores" "Unreadable load average" "A retry answers" "A late answer to a timed-out probe" "Identity mismatch" "status, up, check and down" "Lock busy"]
+   :tests [:test_budget_scales_with_load_per_core_and_is_bounded :test_unknown_load_is_treated_as_busy
+           :test_every_probe_timing_out_is_unverified_with_evidence :test_a_retry_that_answers_attests
+           :test_a_late_answer_to_an_earlier_probe_counts :test_an_identity_mismatch_is_not_retried
+           :test_status_and_up_report_unverified_and_keep_the_record :test_down_stops_an_owned_runner_that_does_not_answer
+           :test_unverified_is_reported_and_never_cold_started :test_a_loop_error_is_reported_and_never_cold_started
+           :test_no_session_is_still_a_cold_start]
+   :rationale "ks-1ag, measured 2026-10-31 in pdfreader at load ~70: an 8 s probe timeout read as 'no warm JVM', a second boot also timed out, and the check returned unknown while the original JVM was alive and ready."}
+  {:id :LOOP-ENV-FINGERPRINT-004 :status :active
+   :ears "The environment fingerprint that forces a runner restart shall hash the parsed, canonical EDN of what decides the runner JVM: every top-level deps.edn key except :aliases, the aliases the runner uses (and path-vector aliases), the alias set, the parsed tests.edn, and this library's files as bytes. Comments, whitespace, #_ discards, metadata, key order and unused aliases shall not restart; a deps.edn that does not read as EDN shall fall back to its bytes."
+   :misreadings ["Any deps.edn byte change changes the classpath." "Only :deps matters."]
+   :boundaries ["Comment-only edit" "Reordered keys" "Discarded form" "Unused alias edit" "Used alias jvm-opts/extra-deps/extra-paths" ":paths and :mvn/repos" "Unreadable deps.edn"]
+   :tests [:test_comments_whitespace_and_key_order_do_not_restart :test_an_unused_alias_does_not_restart
+           :test_what_the_runner_classpath_and_jvm_use_does_restart :test_unreadable_deps_fall_back_to_bytes
+           :test_the_reader_handles_config_edn_forms :test_a_comment_only_deps_edit_does_not_ask_for_a_restart]
+   :rationale "ks-y5y, measured 2026-10-31: comment-only @spec tags in pdfreader deps.edn forced a 35 s COLD START."}
+  {:id :LOOP-RELOAD-FAILURE-005 :status :active
+   :ears "When a warm check's reload fails, the receipt shall report status fail, stage reload, and reload-failure (namespace, file:line, column, phase, message), a load entry in failures, and the namespaces not reloaded; it shall never report pass. While the runner says the JVM is usable (no VirtualMachineError in the cause chain), the loop shall leave the runner untainted, and the next check's full closure reload shall repair the stale namespace in the same JVM. A failed dependency scan shall also leave it untainted."
+   :misreadings ["A syntax error poisons the JVM." "A failed reload can be followed by a pass on stale code." "An older runner's reload failure is safe to keep."]
+   :boundaries ["Read error (EOF)" "Compile error" "OutOfMemoryError cause" "Older runner without jvm-usable" "Dependency scan failure" "Fix then re-check"]
+   :tests [:a-reload-syntax-error-is-reported-and-the-next-reload-repairs-it :only-a-vm-error-makes-the-jvm-unusable
+           :test_a_reload_failure_in_a_usable_jvm_is_reported_and_keeps_it_warm :test_an_unhealthy_jvm_still_taints
+           :test_a_reload_failure_is_never_a_pass :test_a_failed_dependency_scan_keeps_the_jvm_warm]
+   :rationale "ks-9p5, 2026-10-31: a reload syntax error tainted the runner, so the next check paid a ~12 s cold start."}]}

@@ -74,13 +74,200 @@ def fingerprint(root):
     return h.hexdigest()
 
 
-def environment_fingerprint(root):
-    """Anything that requires a JVM restart: the repo's deps/tests config and this library."""
+class EdnError(ValueError):
+    pass
+
+
+class EdnReader:
+    """A small EDN reader for config files (deps.edn, tests.edn). Values come back as
+    tagged tuples ('map', ...), ('vec', ...), ('tok', text) ... that only feed
+    canonical(); comments, whitespace, commas, #_ discards and ^metadata are dropped."""
+    DELIMITERS = set('()[]{}"; \t\n\r,')
+    CLOSERS = {'(': ')', '[': ']', '{': '}'}
+
+    def __init__(self, text):
+        self.s, self.i = text, 0
+
+    def skip(self):
+        s = self.s
+        while self.i < len(s):
+            c = s[self.i]
+            if c in ' \t\n\r,\f':
+                self.i += 1
+            elif c == ';':
+                end = s.find('\n', self.i)
+                self.i = len(s) if end < 0 else end + 1
+            elif s.startswith('#_', self.i):
+                self.i += 2
+                self.read()
+            else:
+                return
+
+    def token(self):
+        start = self.i
+        while self.i < len(self.s) and self.s[self.i] not in self.DELIMITERS:
+            self.i += 1
+        if self.i == start:
+            raise EdnError('empty token at ' + str(start))
+        return self.s[start:self.i]
+
+    def string(self):
+        start = self.i = self.i + 1
+        while self.i < len(self.s):
+            c = self.s[self.i]
+            if c == '\\':
+                self.i += 2
+            elif c == '"':
+                self.i += 1
+                return self.s[start:self.i - 1]
+            else:
+                self.i += 1
+        raise EdnError('unterminated string')
+
+    def items(self, closer):
+        out = []
+        while True:
+            self.skip()
+            if self.i >= len(self.s):
+                raise EdnError('missing ' + closer)
+            if self.s[self.i] == closer:
+                self.i += 1
+                return out
+            out.append(self.read())
+
+    def read(self):
+        self.skip()
+        s = self.s
+        if self.i >= len(s):
+            raise EdnError('unexpected end of input')
+        c = s[self.i]
+        if c in self.CLOSERS:
+            self.i += 1
+            items = self.items(self.CLOSERS[c])
+            if c == '{':
+                if len(items) % 2:
+                    raise EdnError('map with an odd number of forms')
+                return ('map', list(zip(items[::2], items[1::2])))
+            return ('vec' if c == '[' else 'list', items)
+        if c in ')]}':
+            raise EdnError('unmatched ' + c)
+        if c == '"':
+            return ('str', self.string())
+        if c == '\\':
+            self.i += 1
+            first = s[self.i:self.i + 1]
+            if not first:
+                raise EdnError('bad character literal')
+            self.i += 1
+            rest = self.token() if self.i < len(s) and s[self.i] not in self.DELIMITERS else ''
+            return ('char', first + rest)
+        if c == '^':
+            self.i += 1
+            self.read()  # metadata does not change the value
+            return self.read()
+        if c == '#':
+            nxt = s[self.i + 1:self.i + 2]
+            if nxt == '{':
+                self.i += 2
+                return ('set', self.items('}'))
+            if nxt == '"':
+                self.i += 1
+                return ('regex', self.string())
+            if nxt == '#':
+                self.i += 2
+                return ('tok', '##' + self.token())
+            if nxt == ':':
+                self.i += 1
+                return ('nsmap', self.token(), self.read())
+            self.i += 1
+            return ('tag', self.token(), self.read())
+        return ('tok', self.token())
+
+
+def read_edn(text):
+    reader = EdnReader(text)
+    value = reader.read()
+    reader.skip()
+    if reader.i != len(text):
+        raise EdnError('more than one top-level form')
+    return value
+
+
+def canonical(value):
+    """A deterministic text for a read EDN value: map entries and set members sorted."""
+    kind = value[0]
+    if kind == 'map':
+        return '{' + ' '.join(sorted(canonical(k) + ' ' + canonical(v) for k, v in value[1])) + '}'
+    if kind == 'set':
+        return '#{' + ' '.join(sorted(canonical(v) for v in value[1])) + '}'
+    if kind in ('vec', 'list'):
+        open_, close = ('[', ']') if kind == 'vec' else ('(', ')')
+        return open_ + ' '.join(canonical(v) for v in value[1]) + close
+    if kind == 'str':
+        return '"' + value[1] + '"'
+    if kind == 'regex':
+        return '#"' + value[1] + '"'
+    if kind == 'char':
+        return '\\' + value[1]
+    if kind in ('tag', 'nsmap'):
+        return '#' + value[1] + ' ' + canonical(value[2])
+    return value[1]
+
+
+def alias_names(aliases):
+    """':test:sublime' -> [':test', ':sublime']."""
+    return [':' + name for name in aliases.split(':') if name]
+
+
+# INTENT: LOOP-ENV-FINGERPRINT-004
+def deps_basis(text, aliases):
+    """The part of deps.edn that decides the runner JVM, as canonical EDN text: every
+    top-level key except :aliases (:deps, :paths, :mvn/repos ...), and of :aliases only
+    the aliases this runner uses, plus any vector-valued alias (an alias that names
+    paths, usable from :paths). Comments, whitespace, key order and unused aliases do
+    not count. Raises EdnError when the text does not read as one EDN map."""
+    value = read_edn(text)
+    if value[0] != 'map':
+        raise EdnError('deps.edn is not a map')
+    used = set(alias_names(aliases))
+    parts = []
+    for key, val in value[1]:
+        if canonical(key) != ':aliases':
+            parts.append(('top', canonical(key), canonical(val)))
+            continue
+        if val[0] != 'map':
+            parts.append(('top', ':aliases', canonical(val)))
+            continue
+        for alias, body in val[1]:
+            name = canonical(alias)
+            if name in used or body[0] == 'vec':
+                parts.append(('alias', name, canonical(body)))
+    return json.dumps(sorted(parts))
+
+
+def config_basis(name, data, aliases):
+    """What to hash for deps.edn / tests.edn: canonical EDN of what affects the runner,
+    or, when the file does not read as EDN, its bytes (any edit then restarts)."""
+    try:
+        text = data.decode('utf-8')
+        if name == 'deps.edn':
+            return b'edn:' + deps_basis(text, aliases).encode()
+        return b'edn:' + canonical(read_edn(text)).encode()
+    except (UnicodeDecodeError, EdnError, IndexError, RecursionError):
+        return b'bytes:' + data
+
+
+def environment_fingerprint(root, aliases=None):
+    """Anything that requires a JVM restart: what the repo's deps.edn says about the
+    runner classpath for these aliases, tests.edn (both parsed, so comments and
+    whitespace do not count), and this library's own files (bytes)."""
+    aliases = default_aliases(root) if aliases is None else aliases
     h = hashlib.sha256()
+    h.update(('aliases ' + aliases).encode())
     for name in ('deps.edn', 'tests.edn'):
         p = root / name
         h.update(name.encode())
-        h.update(p.read_bytes() if p.is_file() else b'<absent>')
+        h.update(config_basis(name, p.read_bytes(), aliases) if p.is_file() else b'<absent>')
     library_files = [LIBRARY / 'deps.edn', LIBRARY / 'bin' / 'sublime-loop',
                      *(LIBRARY / 'src').rglob('*.clj')]
     for p in sorted(library_files):
@@ -175,7 +362,7 @@ def render_failures(receipt):
     readable without jq: one stanza per failure with test, file:line, message and
     expected/actual one-liners, plus the last lines of the test's output. '' when the
     check passed or carried nothing to show."""
-    if receipt.get('status') not in ('fail', 'stale', 'unknown'):
+    if receipt.get('status') not in ('fail', 'stale', 'unknown', 'unverified'):
         return ''
     out = []
     counts = receipt.get('counts') or {}
@@ -202,6 +389,15 @@ def render_failures(receipt):
         out.append('')
         out.append('... %d more failures not shown; see the Kaocha receipt at %s' % (omitted, receipt.get('path')))
     return '\n'.join(out) + '\n' if out else ''
+
+
+# INTENT: LOOP-RELOAD-FAILURE-005
+def reload_failure_is_terminal(receipt):
+    """A check that failed to reload or scan, in a JVM the runner says is still usable,
+    is a terminal fail that leaves the runner warm: the next check reloads the whole
+    closure again and so repairs the namespace that failed."""
+    return (receipt.get('status') == 'fail' and receipt.get('stage') in ('reload', 'dependency-scan')
+            and receipt.get('jvm-usable') is True)
 
 
 def probe_process(pid):
@@ -250,6 +446,52 @@ def classify(session, root, probe=probe_process, listeners=port_listeners):
     return {'state': 'live', 'reason': 'owned-and-listening', 'owned': True}
 
 
+PROBE_BASE_S = 5
+PROBE_MAX_S = 20
+PROBE_SCALE_MAX = 6.0
+
+
+def load_per_core(getloadavg=os.getloadavg, cpus=os.cpu_count):
+    """{'load_1m', 'cpus', 'per_core'}; per_core None when the load cannot be read."""
+    count = cpus() or 1
+    try:
+        load = getloadavg()[0]
+    except (OSError, AttributeError):
+        return {'load_1m': None, 'cpus': count, 'per_core': None}
+    return {'load_1m': round(load, 2), 'cpus': count, 'per_core': round(load / count, 2)}
+
+
+# INTENT: LOOP-PROBE-UNVERIFIED-003
+def probe_budget(per_core):
+    """How long and how often to wait for a liveness answer from the warm JVM at this
+    1-minute load per core (None = unknown, treated as busy). Bounded: at most 3
+    attempts of at most PROBE_MAX_S each, so a probe never outlasts the lock wait."""
+    per_core = 1.0 if per_core is None else max(0.0, per_core)
+    scale = min(PROBE_SCALE_MAX, 1.0 + per_core)
+    attempts = 2 if per_core < 1 else 3
+    return {'timeout_s': min(PROBE_MAX_S, int(round(PROBE_BASE_S * scale))),
+            'client_margin_s': min(10, int(round(3 * scale))),
+            'attempts': attempts,
+            'backoff_s': [min(4, 2 ** n) for n in range(attempts - 1)]}
+
+
+class NoReceipt(RuntimeError):
+    """The nREPL request produced no terminal receipt (timeout, refused, client error)."""
+
+    def __init__(self, message, response_path=None, request_id=None):
+        super().__init__(message)
+        self.response_path, self.request_id = response_path, request_id
+
+
+class Unverified(RuntimeError):
+    """A recorded runner whose process and port are proven ours did not answer nREPL.
+    Neither live nor dead: never replaced by a second JVM, never reported as ready."""
+
+    def __init__(self, message, evidence):
+        super().__init__(message)
+        self.evidence = evidence
+
+
 def utc_stamp():
     return datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
 
@@ -283,6 +525,8 @@ def read_transport(path, request_id):
 
 class Loop:
     def __init__(self, root, aliases, env, explicit_aliases=False):
+        self.load = load_per_core
+        self.sleep = time.sleep
         self.root = root
         self.aliases = aliases
         self.explicit_aliases = explicit_aliases
@@ -291,7 +535,7 @@ class Loop:
         self.session_path = self.run / 'session.json'
         self.taint = self.run / 'tainted'
 
-    def evaluate(self, session, expression, timeout=120):
+    def evaluate(self, session, expression, timeout=120, margin=3):
         # Nonce-bound receipt (curtaincall variant): a unique, atomically published
         # file survives test stdout capture, and the request-id binds the result to
         # this exact request, never a prior green.
@@ -310,16 +554,53 @@ class Loop:
         try:
             result = subprocess.run(['clj-nrepl-eval', '--port', str(session['port']),
                                      '--timeout', str(timeout * 1000), code], cwd=self.root,
-                                    text=True, capture_output=True, timeout=timeout + 3)
+                                    text=True, capture_output=True, timeout=timeout + margin)
             detail = (result.stderr or result.stdout)[-1600:]
         except subprocess.TimeoutExpired:
-            detail = 'clj-nrepl-eval timed out after ' + str(timeout + 3) + 's'
+            detail = 'clj-nrepl-eval timed out after ' + str(timeout + margin) + 's'
         if response_path.exists():
             return read_transport(response_path, request_id)
-        raise RuntimeError('nREPL returned no terminal receipt: ' + detail)
+        raise NoReceipt('nREPL returned no terminal receipt: ' + detail, response_path, request_id)
 
-    def attest(self, session):
-        actual = self.evaluate(session, RUNNER_NS + '/identity-data', timeout=5)
+    def attest(self, session, spawned=False):
+        """Ask the runner who it is. Under load a probe can time out while the runner is
+        fine, so the wait and the retries scale with the load per core, and a late answer
+        to an earlier attempt counts. No answer at all raises Unverified, never a guess."""
+        load = self.load()
+        budget = probe_budget(load['per_core'])
+        attempts, pending, actual = [], [], None
+        started = time.monotonic()
+        for n in range(budget['attempts']):
+            if n:
+                self.sleep(budget['backoff_s'][n - 1])
+            actual = self.late_answer(pending)
+            if actual is not None:
+                break
+            t0 = time.monotonic()
+            try:
+                actual = self.evaluate(session, RUNNER_NS + '/identity-data',
+                                       timeout=budget['timeout_s'], margin=budget['client_margin_s'])
+                break
+            except NoReceipt as exc:
+                attempts.append({'attempt': n + 1, 'elapsed_s': round(time.monotonic() - t0, 2),
+                                 'detail': one_line(exc, 300)})
+                pending.append((exc.response_path, exc.request_id))
+        if actual is None:
+            actual = self.late_answer(pending)
+        if actual is None:
+            evidence = {'pid': session.get('pid'), 'port': session.get('port'),
+                        'generation': session.get('generation'),
+                        'process': 'spawned by this command' if spawned else 'alive, java, generation marker in its command line',
+                        'port_owner': session.get('pid') if not spawned else None,
+                        'nrepl': 'no answer to ' + str(len(attempts)) + ' identity probes',
+                        'attempts': attempts, 'budget': budget,
+                        'probe_s': round(time.monotonic() - started, 2), **load}
+            raise Unverified('warm JVM pid %s (port %s) is alive%s but did not answer nREPL: '
+                             '%d probes of %ds at load %s/core; not starting another JVM. Retry '
+                             'when the load drops, or `sublime-loop down` then `up` to replace it'
+                             % (session.get('pid'), session.get('port'),
+                                '' if spawned else ' and owns its port', len(attempts),
+                                budget['timeout_s'], load['per_core']), evidence)
         for key in ('root', 'pid', 'generation', 'role'):
             if actual.get(key) != session.get(key):
                 raise RuntimeError('runtime identity mismatch: ' + key)
@@ -327,8 +608,20 @@ class Loop:
             raise RuntimeError('wrong worktree or runtime role')
         return actual
 
-    def load_session(self):
-        """Return (session, stale_archive). A stale record is archived, never trusted."""
+    def late_answer(self, pending):
+        """The identity value from an earlier probe whose answer arrived after it timed out."""
+        for path, request_id in pending:
+            if path is not None and path.exists():
+                try:
+                    return read_transport(path, request_id)
+                except (OSError, ValueError, KeyError, RuntimeError):
+                    continue
+        return None
+
+    def load_session(self, attest=True):
+        """Return (session, stale_archive). A stale record is archived, never trusted.
+        attest=False (down) trusts the ps/lsof ownership proof alone, so an owned runner
+        that no longer answers nREPL can still be stopped."""
         if not self.session_path.exists():
             return None, None
         session = json.loads(self.session_path.read_text())
@@ -341,8 +634,10 @@ class Loop:
                 self.terminate(session['pid'])
             self.taint.unlink(missing_ok=True)
             return None, {'path': str(archive), 'reason': verdict['reason']}
-        # Alive and owned: attest via nREPL. A hung runner errors here and keeps its record.
-        self.attest(session)
+        # Alive and owned: attest via nREPL. A runner that does not answer is Unverified
+        # and keeps its record: it is never archived, replaced or reported as ready.
+        if attest:
+            self.attest(session)
         return session, None
 
     def terminate(self, pid):
@@ -385,13 +680,15 @@ class Loop:
                 session = json.loads(self.session_path.read_text())
                 if session['generation'] != generation:
                     raise RuntimeError('unexpected generation during startup')
-                self.attest(session)
-                session['environment'] = environment_fingerprint(self.root)
+                # Record what this JVM was started with first: if the attest below goes
+                # unanswered under load, the record still describes it for the next probe.
+                session['environment'] = environment_fingerprint(self.root, self.aliases)
                 session['aliases'] = self.aliases
                 tmp = self.run / 'session.json.tmp'
                 tmp.write_text(json.dumps(session))
                 tmp.replace(self.session_path)
                 self.taint.unlink(missing_ok=True)
+                self.attest(session, spawned=True)
                 return session, stale
             if process.poll() is not None:
                 raise RuntimeError('startup failed; see ' + str(self.run / 'boot.log'))
@@ -408,7 +705,7 @@ class Loop:
             if stale:
                 receipt.update(stale_record=stale['path'], stale_reason=stale['reason'])
             return receipt
-        session, stale = self.load_session()
+        session, stale = self.load_session(attest=False) if command == 'down' else self.load_session()
         if session is None:
             if stale and command in ('status', 'down'):
                 return {'status': 'stopped', 'stale_record': stale['path'],
@@ -428,7 +725,7 @@ class Loop:
                                    'project.core-test project.db-test/reads-rows')
             if self.taint.exists():
                 raise RuntimeError('test process tainted; restart the owned runner')
-            if session.get('environment') != environment_fingerprint(self.root):
+            if session.get('environment') != environment_fingerprint(self.root, self.aliases):
                 raise RuntimeError('runner or dependencies changed; run sublime-loop down then up')
             self.require_aliases(session)
             before = fingerprint(self.root)
@@ -437,8 +734,13 @@ class Loop:
             after = fingerprint(self.root)
             # A focus refusal (a named test var does not exist) comes after a complete
             # reload and runs nothing, so it leaves a clean image: terminal, untainted.
+            # A failed reload or dependency scan runs nothing and is reported as fail; the
+            # runner says whether the JVM is still usable (older runners do not: tainted).
+            if receipt.get('reload-failure') and receipt.get('status') == 'pass':
+                receipt['status'] = 'fail'
             terminal = ((receipt.get('status') in ('pass', 'fail') and receipt.get('counts') is not None)
-                        or (receipt.get('status') == 'fail' and receipt.get('stage') == 'focus'))
+                        or (receipt.get('status') == 'fail' and receipt.get('stage') == 'focus')
+                        or reload_failure_is_terminal(receipt))
             if before != after:
                 receipt['status'] = 'stale'
             if terminal:
@@ -500,6 +802,10 @@ def main(argv=None):
         names = [n for arg in args.names for n in arg.split(',') if n]
         try:
             receipt = loop.command(args.command, names)
+        except Unverified as exc:
+            receipt = {'status': 'unverified', 'error': str(exc), 'evidence': exc.evidence,
+                       'pid': exc.evidence.get('pid'), 'port': exc.evidence.get('port'),
+                       'generation': exc.evidence.get('generation')}
         except Exception as exc:
             receipt = {'status': 'unknown', 'error': str(exc)}
         receipt.update(schema='dev-loop.v1', root=str(root), wall_s=round(time.monotonic() - start, 4),
@@ -514,7 +820,7 @@ def main(argv=None):
         print(json.dumps(receipt))
         if args.command == 'check':
             sys.stderr.write(render_failures(receipt))
-        if receipt['status'] == 'unknown':
+        if receipt['status'] in ('unknown', 'unverified'):
             return 2
         return 0 if receipt['status'] in ('ready', 'stopped', 'pass') else 1
 

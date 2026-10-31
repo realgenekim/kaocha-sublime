@@ -265,7 +265,16 @@ and that it owns the recorded port (`lsof`). Otherwise the record is archived to
 `session.stale-<pid>-<UTC>.json` (never deleted or overwritten): `up` boots fresh,
 `status`/`down` report `stopped` with `stale_record`, and `check` asks for `up`.
 A process whose ownership is not proven is never signalled. A live, owned runner
-that does not answer nREPL is an error and keeps its record.
+that does not answer nREPL is `unverified` (exit 2): the identity probe waits and retries
+in proportion to the 1-minute load per core (bounded), counts a late answer, and otherwise
+reports the evidence (pid, port, generation, attempts, load). It keeps its record, is never
+reported ready, and no second JVM is started for the root; `down` can still stop it.
+
+The restart fingerprint reads `deps.edn` and `tests.edn` as EDN: comments, whitespace, key
+order and aliases the runner does not use do not restart the JVM; `:deps`, `:paths`, other
+top-level keys and the used aliases do. A reload error (for example a syntax error) is a
+`fail` at `stage: reload` naming the namespace, `file:line` and message; the JVM stays warm,
+and the next check reloads the closure again, which repairs the namespace.
 
 Never vendor `bin/dev-loop` or `dev/feedback.clj` into a repo. Improvements land
 here, with tests: `python3 -m unittest discover -s test -p 'test_*.py' -v`.

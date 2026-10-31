@@ -259,7 +259,16 @@ test-focus: COLD START -- no warm JVM for this root; starting the warm JVM (subl
 |---|---|
 | `no warm JVM for this root` | First check of a session, or after `down`. Once per session is normal. |
 | `warm JVM tainted` | A previous check did not finish cleanly. |
-| `dependencies, runner or aliases changed` | You edited `deps.edn`/`tests.edn`, pulled a library change, or passed different `--aliases`. |
+| `dependencies, runner or aliases changed` | You changed what `deps.edn`/`tests.edn` say about the runner (`:deps`, `:paths`, another top-level key, or a used alias), pulled a library change, or passed different `--aliases`. Comments, whitespace, key order and unused aliases do not count. |
+
+Two things are never a COLD START:
+
+- **UNVERIFIED** — the warm JVM is alive and owns its port but did not answer nREPL in
+  time, which happens on a heavily loaded machine. `test-focus` prints
+  `test-focus: UNVERIFIED -- ...`, prints the `unverified` receipt and exits 2. It does not
+  start a second JVM. Retry when the load drops.
+- **A reload error** (a syntax error, an unresolved symbol) — the check fails at
+  `stage: reload` and the JVM stays warm. Fix the file and run the check again.
 
 More than one COLD START per session, without one of these causes, means the loop is
 paying JVM startup on every check. Find out why.
@@ -277,6 +286,7 @@ Every command prints one `dev-loop.v1` JSON receipt and also writes it to
 | `stale` | Source files changed while the check ran. | Run the check again. |
 | `tainted` | A check did not reach a terminal result; the JVM may be half-loaded. | `sublime-loop down`, then `warm-jvm` (or just run `test-focus`). |
 | `stopped` | `down` worked, or a stale session record was archived. | — |
+| `unverified` | The JVM process is alive and owns its port, but no nREPL answer arrived in time (machine under load). Not ready, not gone. | Retry later. `evidence` has the pid, port, attempts and load. To replace it: `down`, then `up`. |
 | `unknown` | The loop itself failed (no JVM, lock timeout, startup failure). | Read `error`. |
 
 Useful fields in a check receipt: `counts` (tests, assertions, pass, fail, error,
@@ -285,14 +295,34 @@ this check), `reload-targets` (namespaces reloaded), `path` (Kaocha run receipt,
 `checks` (the targets you named), `generation`. A `fail` with `stage: focus` means a named
 test var does not exist; the JVM stays warm.
 
+A `fail` with `stage: reload` means a namespace did not load. Nothing ran, and the check
+is never a `pass`. The receipt carries:
+
+| Field | Content |
+|---|---|
+| `reload-failure` | `namespace`, `at` (`file:line`), `file`, `line`, `column`, `phase` (`read-source`, `compile-syntax-check`, `macroexpansion`, `execution`), `message`, `class` |
+| `failures` | one entry with `kind: load`, `test` = the namespace, `at`, `message` (so the stderr block shows it) |
+| `not-reloaded` | the failed namespace and the ones after it: they keep their previous code until the next check |
+| `jvm-usable` | `true` unless the error says the JVM itself is in trouble (for example `OutOfMemoryError`); only then is the runner tainted |
+
+An `unverified` receipt carries `evidence`: `pid`, `port`, `generation`, `attempts` (each
+with `elapsed_s` and `detail`), `budget` (`timeout_s`, `attempts`, `backoff_s`), `load_1m`,
+`cpus` and `per_core`. The probe waits 5 s times (1 + load per core), at most 20 s, for at
+most 3 attempts.
+
 ## 10. Troubleshooting
 
 - **`runner busy for 120 seconds`** — another command holds `.dev-loop/lock` for this
   root. Wait for it to finish. Do not delete the lock while a check runs.
 - **`test process tainted`** — `sublime-loop --root R down`, then start again.
   `test-focus` does this automatically.
-- **`runner or dependencies changed`** — `deps.edn`, `tests.edn`, the library, or the
-  aliases changed. `down` then `up`; `test-focus` does this automatically.
+- **`runner or dependencies changed`** — what `deps.edn`/`tests.edn` say about the runner,
+  the library, or the aliases changed. `down` then `up`; `test-focus` does this
+  automatically. A comment or whitespace edit does not cause it (a `deps.edn` that does not
+  read as EDN is compared byte for byte).
+- **`status: unverified`** — see section 9. The JVM is probably busy, not dead. Do not
+  start another one; retry, or `down` then `up` if it stays unresponsive when the machine
+  is quiet.
 - **Stale session record** — if the JVM died, the next command archives
   `session.json` to `session.stale-<pid>-<UTC>.json` and reports `stale_record`.
   `up` then starts fresh. A process that is not proven to be this loop's JVM is never

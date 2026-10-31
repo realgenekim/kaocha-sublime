@@ -9,7 +9,10 @@
 # dependencies/runner/aliases changed, it says so LOUDLY on stderr ("COLD START"), starts
 # or restarts the warm JVM, and then runs the check. Every cold start is visible: one per
 # session is the cost of doing business; more than one means the inner loop is being paid
-# for cold. A wrong --root is refused (exit 2) before any JVM starts; a relative --root
+# for cold. A warm JVM that is alive and owns its port but does not answer nREPL in time
+# (a loaded machine) is "unverified": test-focus says so (UNVERIFIED, exit 2) and never
+# starts a second JVM for the root. Any other loop error is reported, not cold-started.
+# A wrong --root is refused (exit 2) before any JVM starts; a relative --root
 # resolves from anywhere in the checkout. A failing check's receipt carries "failures": each
 # failing assertion with test var, file:line, message, expected, actual and the test's captured
 # stdout/stderr; a readable block of the same goes to stderr after the JSON line.
@@ -32,8 +35,22 @@ done
 block="$(mktemp "${TMPDIR:-/tmp}/test-focus.XXXXXX")"
 trap 'rm -f "$block"' EXIT
 cold() { echo "test-focus: COLD START -- $1; starting the warm JVM (sublime-loop up)" >&2; }
+unverified() {
+  echo "test-focus: UNVERIFIED -- the warm JVM for this root is alive but did not answer nREPL" \
+       "in time (machine under load?); not starting a second JVM. Evidence is in the receipt." >&2
+  printf '%s\n' "$1"; exit 2
+}
 # Start/restart receipts go to stderr so stdout carries exactly one receipt: the check's.
-up() { "$LOOP" ${flags[@]+"${flags[@]}"} up >&2; }
+# A failed start prints its receipt on stdout (the one receipt) and exits with its code;
+# an unverified one (a JVM started but its answer did not arrive in time) says so.
+up() {
+  local r rc=0
+  r="$("$LOOP" ${flags[@]+"${flags[@]}"} up)" || rc=$?
+  if [ "$rc" -eq 0 ]; then printf '%s\n' "$r" >&2; return 0; fi
+  case "$r" in *'"status": "unverified"'*) unverified "$r" ;; esac
+  echo "test-focus: the warm JVM did not start; see the receipt" >&2
+  printf '%s\n' "$r"; exit "$rc"
+}
 down() { "$LOOP" ${flags[@]+"${flags[@]}"} down >&2 || true; }
 status="$("$LOOP" ${flags[@]+"${flags[@]}"} status 2>/dev/null || true)"
 # A wrong --root is a usage error, never a cold start: say so and spend no JVM.
@@ -45,7 +62,10 @@ esac
 case "$status" in
   *'"status": "ready"'*) ;;
   *'"status": "tainted"'*) cold "warm JVM tainted"; down; up ;;
-  *) cold "no warm JVM for this root"; up ;;
+  *'"status": "unverified"'*) unverified "$status" ;;
+  *'"status": "stopped"'*|*'no owned test process'*) cold "no warm JVM for this root"; up ;;
+  *) echo "test-focus: the loop could not report on the warm JVM (no JVM started); see the receipt" >&2
+     printf '%s\n' "$status"; exit 2 ;;
 esac
 out="$("$LOOP" ${flags[@]+"${flags[@]}"} check "${names[@]}" 2>"$block")" && rc=0 || rc=$?
 case "$out" in

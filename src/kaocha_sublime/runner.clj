@@ -6,11 +6,13 @@
   Contract with bin/sublime-loop:
   - `identity-data` {:root :pid :generation :role \"test-only\"}
   - `(check! [\"ns-name\" ...])` -> {:status \"pass\"|\"fail\"|\"unknown\" :counts ...}
+    (a failed reload adds :reload-failure, :not-reloaded and :jvm-usable)
   - `(write-json value)` -> JSON string (the CLI's transport receipt encoder)
   - `-main` writes `.dev-loop/session.json` atomically once nREPL listens."
   (:require
    [clojure.edn :as edn]
    [clojure.java.io :as io]
+   [clojure.main :as main]
    [clojure.string :as str]
    [clojure.tools.namespace.dependency :as dependency]
    [clojure.tools.namespace.dir :as scan]
@@ -229,6 +231,43 @@
              :when (not (and v (:test (meta v))))]
          (str sym))))
 
+;; INTENT: LOOP-RELOAD-FAILURE-005
+(defn jvm-usable?
+  "False when a reload failure says the JVM itself is in trouble (a VirtualMachineError
+  such as OutOfMemoryError anywhere in the cause chain), not merely that one namespace
+  failed to read, compile or load."
+  [^Throwable t]
+  (not-any? #(instance? VirtualMachineError %)
+            (take 10 (take-while some? (iterate #(.getCause ^Throwable %) t)))))
+
+(defn reload-failure
+  "What a failed (require ns :reload) tells a reader: the namespace, the source file
+  relative to the root and the line/column of the error, the phase (read-source,
+  compile-syntax-check, macroexpansion, execution ...) and the message."
+  [ns-sym ^Throwable t ns-file]
+  (let [triage (try (main/ex-triage (Throwable->map t)) (catch Throwable _ {}))
+        path (:clojure.error/path triage)
+        ns-path (when ns-file
+                  (let [root (.getCanonicalFile (io/file "."))
+                        f (.getCanonicalFile (io/file ns-file))]
+                    (str (.relativize (.toPath root) (.toPath f)))))
+        file (or (when path (let [r (root-relative nil path)] (when (not= r path) r)))
+                 ns-path path)
+        line (:clojure.error/line triage)
+        line (when (and (integer? line) (pos? line)) line)]
+    (->> [:namespace (str ns-sym)
+          :at (when file (str file (when line (str ":" line))))
+          :file file
+          :line line
+          :column (:clojure.error/column triage)
+          :phase (some-> (:clojure.error/phase triage) name)
+          :message (clip (or (:clojure.error/cause triage) (.getMessage t) (.getName (class t))) value-limit)
+          :class (.getName (class (or (some-> t .getCause) t)))]
+         (partition 2)
+         (remove (comp nil? second))
+         (apply concat)
+         (apply array-map))))
+
 (defn check!
   "Reload the declared dependency closure of the requested namespaces, then run
   exactly those targets through the Sublime probe. A target is a namespace
@@ -244,22 +283,40 @@
                           graph (::track/deps tracker)
                           closure (into (set requested-ns)
                                         (mapcat #(dependency/transitive-dependencies graph %) requested-ns))]
-                      {:targets (filterv closure (::track/load tracker))})
+                      {:targets (filterv closure (::track/load tracker))
+                       :files (into {} (map (fn [[f ns]] [ns f]))
+                                    (:clojure.tools.namespace.file/filemap tracker))})
                     (catch Throwable t {:error t}))]
       (if-let [t (:error scanned)]
-        (assoc base :status "fail" :stage "dependency-scan" :error (.getMessage ^Throwable t))
+        ;; A scan only reads files; nothing was loaded, so the JVM stays usable.
+        (assoc base :status "fail" :stage "dependency-scan" :error (.getMessage ^Throwable t)
+               :jvm-usable true)
         (let [targets (:targets scanned)
               ;; Explicit :reload in dependency order (curtaincall variant) rather than
               ;; handing source namespaces to the probe as focus targets (CD variant):
               ;; edited sources are reloaded for certain, and the probe scope and its
               ;; receipt stay exactly the namespaces the caller asked for.
-              reload-error (try (doseq [target targets] (require target :reload)) nil
-                                (catch Throwable t t))]
+              reload-error (reduce (fn [_ target]
+                                     (try (require target :reload) nil
+                                          (catch Throwable t (reduced {:namespace target :error t}))))
+                                   nil targets)]
           (if reload-error
-            ;; No counts: the CLI keeps the runner tainted because a partial reload
-            ;; can leave the image half-loaded.
-            (assoc base :status "fail" :stage "reload" :error (.getMessage ^Throwable reload-error)
-                   :reload-targets (mapv str targets))
+            ;; No counts and never a pass: nothing ran. The failed namespace (and the
+            ;; ones after it) keep their previous definitions until the next check, which
+            ;; reloads the whole closure again and so repairs them; the JVM stays warm
+            ;; unless the error says the JVM itself is in trouble (jvm-usable false).
+            (let [failure (reload-failure (:namespace reload-error) (:error reload-error)
+                                          (get (:files scanned) (:namespace reload-error)))]
+              (assoc base :status "fail" :stage "reload"
+                     :error (str "reload of " (:namespace failure) " failed"
+                                 (when (:at failure) (str " at " (:at failure))) ": " (:message failure))
+                     :reload-failure failure
+                     :failures [(-> (select-keys failure [:at :file :line :message])
+                                    (assoc :kind "load" :test (:namespace failure)))]
+                     :failures-omitted 0
+                     :not-reloaded (mapv str (drop-while #(not= % (:namespace reload-error)) targets))
+                     :jvm-usable (jvm-usable? (:error reload-error))
+                     :reload-targets (mapv str targets)))
             (if-let [missing (seq (missing-test-vars requested))]
               ;; A typo'd var would focus on nothing and come back "unknown" with zero
               ;; tests; say exactly which name is wrong instead.

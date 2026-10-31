@@ -475,3 +475,314 @@ class UpAliasTest(Workspace):
     def test_up_without_explicit_aliases_reuses_the_live_session(self):
         receipt = self.loop(':test', False).command('up', [])
         self.assertEqual('ready', receipt['status'])
+
+
+# ---------------------------------------------------------------- ks-1ag: probes under load
+
+from unittest import mock
+
+IDLE = {'load_1m': 0.8, 'cpus': 8, 'per_core': 0.1}
+LOADED = {'load_1m': 70.0, 'cpus': 8, 'per_core': 8.75}
+
+
+class ProbeBudgetTest(unittest.TestCase):
+    # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
+    def test_budget_scales_with_load_per_core_and_is_bounded(self):
+        idle = cli.probe_budget(0.1)
+        self.assertEqual(2, idle['attempts'])
+        self.assertLessEqual(idle['timeout_s'], 6)
+        loaded = cli.probe_budget(8.75)
+        self.assertEqual(3, loaded['attempts'])
+        self.assertGreater(loaded['timeout_s'], 8, 'the measured false negative was an 8 s wait at load 70')
+        for per_core in (0, 0.5, 1, 3, 8.75, 15, 500, None):
+            b = cli.probe_budget(per_core)
+            worst = b['attempts'] * (b['timeout_s'] + b['client_margin_s']) + sum(b['backoff_s'])
+            self.assertLess(worst, 120, 'a probe must finish inside the 120 s lock wait')
+            self.assertLessEqual(b['timeout_s'], cli.PROBE_MAX_S)
+            self.assertEqual(b['attempts'] - 1, len(b['backoff_s']))
+
+    # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
+    def test_unknown_load_is_treated_as_busy(self):
+        self.assertEqual(cli.probe_budget(1.0), cli.probe_budget(None))
+        self.assertEqual(None, cli.load_per_core(getloadavg=lambda: (_ for _ in ()).throw(OSError()),
+                                                 cpus=lambda: 8)['per_core'])
+        self.assertEqual(8.75, cli.load_per_core(getloadavg=lambda: (70.0, 1, 1), cpus=lambda: 8)['per_core'])
+
+
+class AttestUnderLoadTest(Workspace):
+    """attest() with a stubbed transport: timeouts are retried, then reported unverified."""
+
+    def loop(self, answers, load=LOADED):
+        loop = cli.Loop(self.root, ':test', {}, False)
+        loop.load = lambda: load
+        self.sleeps, self.calls = [], []
+        loop.sleep = lambda s: self.sleeps.append(s) or self.on_sleep()
+        self.on_sleep = lambda: None
+        answers = list(answers)
+
+        def evaluate(session, expression, timeout=120, margin=3):
+            self.calls.append(timeout)
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        loop.evaluate = evaluate
+        return loop
+
+    def session(self):
+        return record(self.root, 4242)
+
+    def timeout(self, n=0):
+        rid = 'req-' + str(n)
+        return cli.NoReceipt('nREPL returned no terminal receipt: clj-nrepl-eval timed out after 8s',
+                             self.run_dir / ('transport-' + rid + '.json'), rid)
+
+    # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
+    def test_every_probe_timing_out_is_unverified_with_evidence(self):
+        loop = self.loop([self.timeout(n) for n in range(3)])
+        with self.assertRaises(cli.Unverified) as caught:
+            loop.attest(self.session())
+        evidence = caught.exception.evidence
+        self.assertEqual([20, 20, 20], self.calls, 'the wait scales with load per core')
+        self.assertEqual([1, 2], self.sleeps, 'retries back off')
+        self.assertEqual(3, len(evidence['attempts']))
+        self.assertEqual((4242, 45678, GEN), (evidence['pid'], evidence['port'], evidence['generation']))
+        self.assertEqual(8.75, evidence['per_core'])
+        self.assertIn('timed out', evidence['attempts'][0]['detail'])
+        self.assertIn('not starting another JVM', str(caught.exception))
+
+    # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
+    def test_a_retry_that_answers_attests(self):
+        loop = self.loop([self.timeout(), dict(self.session())])
+        self.assertEqual(4242, loop.attest(self.session())['pid'])
+        self.assertEqual(2, len(self.calls))
+
+    # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
+    def test_a_late_answer_to_an_earlier_probe_counts(self):
+        first = self.timeout()
+        loop = self.loop([first])
+        late = {'request-id': first.request_id, 'value': self.session()}
+        self.on_sleep = lambda: first.response_path.write_text(json.dumps(late))
+        self.assertEqual(GEN, loop.attest(self.session())['generation'])
+        self.assertEqual(1, len(self.calls), 'no second probe once the first one answered late')
+
+    # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
+    def test_an_identity_mismatch_is_not_retried(self):
+        loop = self.loop([dict(self.session(), generation='other')])
+        with self.assertRaisesRegex(RuntimeError, 'identity mismatch'):
+            loop.attest(self.session())
+        self.assertEqual(1, len(self.calls))
+
+
+class UnverifiedSessionTest(Workspace):
+    """Through main(): a live, owned, unanswering runner is never replaced or called ready."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_session(dict(record(self.root, 4242), aliases=':test'))
+        self.patches = [
+            mock.patch.object(cli, 'classify', lambda session, root: {'state': 'live', 'reason': 'owned-and-listening', 'owned': True}),
+            mock.patch.object(cli, 'load_per_core', lambda: LOADED),
+            mock.patch.object(cli.Loop, 'evaluate', self.no_answer),
+            mock.patch.object(cli.subprocess, 'Popen', self.no_new_jvm),
+            mock.patch.object(cli.time, 'sleep', lambda s: None),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        super().tearDown()
+
+    def no_answer(self, session, expression, timeout=120, margin=3):
+        raise cli.NoReceipt('nREPL returned no terminal receipt: clj-nrepl-eval timed out after 8s')
+
+    def no_new_jvm(self, *args, **kwargs):
+        raise AssertionError('a second JVM must never start for an unverified root')
+
+    # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
+    def test_status_and_up_report_unverified_and_keep_the_record(self):
+        for command in ('status', 'up', 'check'):
+            args = (command, 'a.core-test') if command == 'check' else (command,)
+            receipt, code = self.invoke(*args)
+            self.assertEqual('unverified', receipt['status'], (command, receipt.get('error')))
+            self.assertEqual(2, code)
+            self.assertEqual(4242, receipt['pid'])
+            self.assertEqual(3, len(receipt['evidence']['attempts']))
+            self.assertNotIn('no owned test process', receipt['error'])
+        self.assertTrue((self.run_dir / 'session.json').exists(), 'the record is kept')
+        self.assertEqual([], self.archives())
+        self.assertFalse((self.run_dir / 'tainted').exists())
+
+    # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
+    def test_down_stops_an_owned_runner_that_does_not_answer(self):
+        stopped = []
+        with mock.patch.object(cli.Loop, 'terminate', lambda loop, pid: stopped.append(pid)):
+            receipt, code = self.invoke('down')
+        self.assertEqual(('stopped', 0, [4242]), (receipt['status'], code, stopped))
+
+
+def fake_focus(tmp, status_json):
+    """A copy of test-focus beside a fake sublime-loop that logs its commands."""
+    bin_dir = Path(tmp) / 'bin'
+    bin_dir.mkdir()
+    (bin_dir / 'test-focus').write_text((SCRIPT.parent / 'test-focus').read_text())
+    log = Path(tmp) / 'calls.log'
+    fake = bin_dir / 'sublime-loop'
+    fake.write_text('#!/usr/bin/env bash\n'
+                    'echo "$*" >> ' + str(log) + '\n'
+                    'case " $* " in\n'
+                    "  *' status '*) echo '" + status_json + "' ;;\n"
+                    "  *' up '*) echo '{\"status\": \"ready\"}' ;;\n"
+                    "  *' check '*) echo '{\"status\": \"pass\"}' ;;\n"
+                    'esac\n')
+    for f in (fake, bin_dir / 'test-focus'):
+        f.chmod(0o755)
+    return str(bin_dir / 'test-focus'), log
+
+
+class TestFocusStatusRoutingTest(unittest.TestCase):
+    def run_focus(self, status_json):
+        with tempfile.TemporaryDirectory() as tmp:
+            focus, log = fake_focus(tmp, status_json)
+            done = subprocess.run([focus, 'a.core-test'], capture_output=True, text=True, timeout=30)
+            return done, log.read_text().split()
+
+    # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
+    def test_unverified_is_reported_and_never_cold_started(self):
+        done, calls = self.run_focus('{"status": "unverified", "pid": 7503}')
+        self.assertEqual(2, done.returncode)
+        self.assertIn('UNVERIFIED', done.stderr)
+        self.assertNotIn('COLD START', done.stderr)
+        self.assertEqual('{"status": "unverified", "pid": 7503}\n', done.stdout)
+        self.assertNotIn('up', calls)
+        self.assertNotIn('check', calls)
+
+    # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
+    def test_a_loop_error_is_reported_and_never_cold_started(self):
+        done, calls = self.run_focus('{"status": "unknown", "error": "runner busy for 120 seconds"}')
+        self.assertEqual(2, done.returncode)
+        self.assertNotIn('COLD START', done.stderr)
+        self.assertNotIn('up', calls)
+
+    # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
+    def test_no_session_is_still_a_cold_start(self):
+        done, calls = self.run_focus('{"status": "unknown", "error": "no owned test process; run sublime-loop up"}')
+        self.assertEqual(0, done.returncode)
+        self.assertIn('COLD START -- no warm JVM for this root', done.stderr)
+        self.assertIn('up', calls)
+        self.assertEqual('{"status": "pass"}\n', done.stdout)
+
+
+# ---------------------------------------------------------------- ks-y5y: parsed deps fingerprint
+
+DEPS = '''{:paths ["src"]
+ :deps {org.clojure/clojure {:mvn/version "1.12.0"}}
+ :aliases {:test {:extra-paths ["test"]
+                  :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
+                  :jvm-opts ["-Xmx512m"]}
+           :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}}}}
+'''
+
+
+class EnvironmentFingerprintTest(Workspace):
+    def env(self, text, aliases=':test'):
+        (self.root / 'deps.edn').write_text(text)
+        return cli.environment_fingerprint(self.root, aliases)
+
+    # INTENT-TEST: LOOP-ENV-FINGERPRINT-004
+    def test_comments_whitespace_and_key_order_do_not_restart(self):
+        base = self.env(DEPS)
+        commented = DEPS.replace(':jvm-opts', ';; @spec LOOP-1 the heap cap (a ; in a comment)\n :jvm-opts')
+        self.assertEqual(base, self.env(commented))
+        self.assertEqual(base, self.env(' \n'.join(DEPS.split('\n')) + '\n\n;; trailing\n'))
+        self.assertEqual(base, self.env(DEPS.replace('{:paths ["src"]\n :deps', '{:deps').replace(
+            ':aliases', ':paths ["src"],\n :aliases')))
+        self.assertEqual(base, self.env(DEPS.replace(':jvm-opts', '#_ :old-key #_ [1 2]\n :jvm-opts')))
+
+    # INTENT-TEST: LOOP-ENV-FINGERPRINT-004
+    def test_an_unused_alias_does_not_restart(self):
+        base = self.env(DEPS)
+        self.assertEqual(base, self.env(DEPS.replace('0.10.5', '0.10.6')))
+
+    # INTENT-TEST: LOOP-ENV-FINGERPRINT-004
+    def test_what_the_runner_classpath_and_jvm_use_does_restart(self):
+        base = self.env(DEPS)
+        for old, new in (('"1.12.0"', '"1.12.1"'),          # :deps
+                         ('["src"]', '["src" "dev"]'),      # :paths
+                         ('["test"]', '["test" "fx"]'),     # used alias :extra-paths
+                         ('1.91.1392', '1.91.1393'),        # used alias :extra-deps
+                         ('-Xmx512m', '-Xmx1g')):           # used alias :jvm-opts
+            self.assertNotEqual(base, self.env(DEPS.replace(old, new)), new)
+        self.assertNotEqual(base, self.env(DEPS, ':test:build'), 'another alias set restarts')
+        self.assertNotEqual(base, self.env(DEPS.replace(':aliases {', ':mvn/repos {"x" {:url "u"}}\n :aliases {')))
+
+    # INTENT-TEST: LOOP-ENV-FINGERPRINT-004
+    def test_unreadable_deps_fall_back_to_bytes(self):
+        broken = DEPS + '}'
+        base = self.env(broken)
+        self.assertNotEqual(base, self.env(broken + ';; comment'), 'unparsed: any edit restarts')
+
+    # INTENT-TEST: LOOP-ENV-FINGERPRINT-004
+    def test_the_reader_handles_config_edn_forms(self):
+        text = ('{:a #{3 1 2} :b \\c :c "x;y\\"z" :d #kaocha/v1 {:k ^:meta [1]} :e #"re" '
+                ':f ##Inf :g #:ns{:x 1} :h (1 2)}')
+        self.assertEqual('{:a #{1 2 3} :b \\c :c "x;y\\"z" :d #kaocha/v1 {:k [1]} :e #"re" :f ##Inf '
+                         ':g #:ns {:x 1} :h (1 2)}', cli.canonical(cli.read_edn(text)))
+        for bad in ('{:a}', '{:a 1', '[1] [2]', '"open', ')'):
+            with self.assertRaises(cli.EdnError, msg=bad):
+                cli.read_edn(bad)
+
+    # INTENT-TEST: LOOP-ENV-FINGERPRINT-004
+    def test_a_comment_only_deps_edit_does_not_ask_for_a_restart(self):
+        (self.root / 'deps.edn').write_text(DEPS)
+        loop = cli.Loop(self.root, ':test', {}, False)
+        session = dict(record(self.root, os.getpid()), aliases=':test',
+                       environment=cli.environment_fingerprint(self.root, ':test'))
+        loop.load_session = lambda attest=True: (session, None)
+        loop.evaluate = lambda session, expression: {'status': 'pass', 'counts': {'tests': 1}}
+        (self.root / 'deps.edn').write_text(';; @spec tags added\n' + DEPS)
+        self.assertEqual('pass', loop.command('check', ['a.core-test'])['status'])
+        (self.root / 'deps.edn').write_text(DEPS.replace('-Xmx512m', '-Xmx1g'))
+        with self.assertRaisesRegex(RuntimeError, 'runner or dependencies changed'):
+            loop.command('check', ['a.core-test'])
+
+
+# ---------------------------------------------------------------- ks-9p5: reload failures
+
+class ReloadFailureTest(CheckTargetTest):
+    FAILURE = {'status': 'fail', 'stage': 'reload',
+               'error': 'reload of a.core failed at src/a/core.clj:4: EOF while reading',
+               'reload-failure': {'namespace': 'a.core', 'at': 'src/a/core.clj:4', 'file': 'src/a/core.clj',
+                                  'line': 4, 'phase': 'read-source', 'message': 'EOF while reading'},
+               'failures': [{'kind': 'load', 'test': 'a.core', 'at': 'src/a/core.clj:4',
+                             'message': 'EOF while reading'}],
+               'failures-omitted': 0, 'not-reloaded': ['a.core', 'a.core-test']}
+
+    # INTENT-TEST: LOOP-RELOAD-FAILURE-005
+    def test_a_reload_failure_in_a_usable_jvm_is_reported_and_keeps_it_warm(self):
+        receipt = self.loop(dict(self.FAILURE, **{'jvm-usable': True})).command('check', ['a.core-test'])
+        self.assertEqual('fail', receipt['status'])
+        self.assertEqual('a.core', receipt['reload-failure']['namespace'])
+        self.assertFalse(self.run_dir.joinpath('tainted').exists(), 'a syntax error must not cost a cold start')
+        text = cli.render_failures(receipt)
+        self.assertIn('LOAD a.core  src/a/core.clj:4', text)
+        self.assertIn('message:  EOF while reading', text)
+
+    # INTENT-TEST: LOOP-RELOAD-FAILURE-005
+    def test_an_unhealthy_jvm_still_taints(self):
+        self.loop(dict(self.FAILURE, **{'jvm-usable': False})).command('check', ['a.core-test'])
+        self.assertTrue(self.run_dir.joinpath('tainted').exists())
+
+    # INTENT-TEST: LOOP-RELOAD-FAILURE-005
+    def test_a_reload_failure_is_never_a_pass(self):
+        receipt = self.loop(dict(self.FAILURE, status='pass', counts={'tests': 1}, **{'jvm-usable': True})).command(
+            'check', ['a.core-test'])
+        self.assertEqual('fail', receipt['status'])
+
+    # INTENT-TEST: LOOP-RELOAD-FAILURE-005
+    def test_a_failed_dependency_scan_keeps_the_jvm_warm(self):
+        self.loop({'status': 'fail', 'stage': 'dependency-scan', 'error': 'bad ns form',
+                   'jvm-usable': True}).command('check', ['a.core-test'])
+        self.assertFalse(self.run_dir.joinpath('tainted').exists())

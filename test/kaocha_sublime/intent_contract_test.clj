@@ -9,12 +9,21 @@
         (filter #(and (.isFile %) (.endsWith (.getName %) ".clj"))
                 (file-seq (io/file root)))))
 
+(defn hash-tags [root keep? pattern]
+  (into #{} (mapcat #(map second (re-seq pattern (slurp %))))
+        (filter #(and (.isFile ^java.io.File %) (keep? %)) (file-seq (io/file root)))))
+
 (deftest intent-links-in-both-directions
   (let [rows (:intents (edn/read-string (slurp "docs/intent/registry.edn")))
         known (set (map (comp name :id) rows))
         active (set (map (comp name :id) (filter #(= :active (:status %)) rows)))
-        code (tags "src" #"(?m);;\s*INTENT:\s*([A-Z][A-Z0-9-]*)")
-        tests (tags "test" #"(?m);;\s*INTENT-TEST:\s*([A-Z][A-Z0-9-]*)")]
+        ;; The loop CLI (bin/, Python and bash) and its Python tests tag with # comments.
+        code (into (tags "src" #"(?m);;\s*INTENT:\s*([A-Z][A-Z0-9-]*)")
+                   (hash-tags "bin" #(not (.contains (.getPath ^java.io.File %) "__pycache__"))
+                              #"(?m)#\s*INTENT:\s*([A-Z][A-Z0-9-]*)"))
+        tests (into (tags "test" #"(?m);;\s*INTENT-TEST:\s*([A-Z][A-Z0-9-]*)")
+                    (hash-tags "test" #(.endsWith (.getName ^java.io.File %) ".py")
+                               #"(?m)#\s*INTENT-TEST:\s*([A-Z][A-Z0-9-]*)"))]
     (is (= (count rows) (count known)) "Stable intent IDs are unique")
     (is (empty? (set/difference active code)) "Every active promise has code")
     (is (empty? (set/difference active tests)) "Every active promise has a test")
