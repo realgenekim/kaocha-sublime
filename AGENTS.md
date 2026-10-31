@@ -5,6 +5,11 @@ the design root is `docs/high-level-design.md`.
 
 ## Working here
 
+- **Develop in a worktree, not in this checkout.** `~/src.local/kaocha-sublime` is the live
+  runner for every warm JVM on the machine: editing `bin/` or `src/` here changes the
+  fingerprint, so every other repo's next `test-focus` cold-restarts mid-batch. Work in
+  `~/src.local/worktrees/kaocha-sublime/<name>`, then land the change in one step
+  between batches (SETUP §13, rule 6).
 - Verify with this repo's OWN warm JVM: `bin/warm-jvm --root <this checkout>`, then
   `bin/test-focus <test namespaces or ns/var>`. Never start, stop or query warm JVMs of
   other roots; other repos use them.
