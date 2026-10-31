@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [kaocha-sublime.reload :as reload]
             [kaocha-sublime.runner :as runner]))
 
 (defn- var-node
@@ -245,3 +246,72 @@
   (let [r (runner/check! ["kaocha-sublime.runner-fixture/absent"])]
     (is (not (contains? r :reloaded)) "the default reloads, as before")
     (is (= ["kaocha-sublime.runner-fixture"] (:reload-targets r)))))
+
+;; ---------------------------------------------------------------- reload unmaps deleted definitions
+
+(def ^:private unmap-header
+  "(ns kaocha-sublime.unmap-fixture (:require [clojure.test :refer [deftest is]]))\n(defonce state (atom 0))\n(defprotocol Shape (area [s]))\n(defrecord Sq [n] Shape (area [_] (* n n)))\n")
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-013
+(deftest a-definition-deleted-from-its-file-is-unmapped-and-defonce-state-survives
+  ;; Transient file under test/ (deleted in finally); the absent-var target stops each check
+  ;; at the focus refusal after a complete reload, so no nested Kaocha run.
+  (let [f (io/file "test/kaocha_sublime/unmap_fixture.clj")
+        target ["kaocha-sublime.unmap-fixture/absent"]
+        fixture #(ns-resolve 'kaocha-sublime.unmap-fixture %)]
+    (try
+      (spit f (str unmap-header "(defn gone [] :old)\n(defn kept [] :kept)\n(deftest deleted-test (is true))\n"))
+      (is (= "focus" (:stage (runner/check! target))))
+      (is (= :old ((fixture 'gone))))
+      (swap! @(fixture 'state) inc)
+      (let [state-atom @(fixture 'state)
+            state-var (fixture 'state)
+            shape-var (fixture 'Shape)
+            kept-var (fixture 'kept)]
+        (spit f (str unmap-header "(defn kept [] :kept-2)\n"))
+        (let [r (runner/check! target)]
+          (is (= "focus" (:stage r)) "the reload succeeded")
+          (is (nil? (fixture 'gone)) "the deleted function's var is gone")
+          (is (thrown? Exception (eval '(kaocha-sublime.unmap-fixture/gone)))
+              "calling it fails, as in a cold JVM")
+          (is (nil? (fixture 'deleted-test)) "a deleted test var is gone too")
+          (is (= [{:ns "kaocha-sublime.unmap-fixture" :var "deleted-test"
+                   :at "test/kaocha_sublime/unmap_fixture.clj:7"}
+                  {:ns "kaocha-sublime.unmap-fixture" :var "gone"
+                   :at "test/kaocha_sublime/unmap_fixture.clj:5"}]
+                 (sort-by :var (:unmapped r)))
+              "each unmapped var with where the file used to define it")
+          (is (identical? state-var (fixture 'state)) "never remove-ns: the defonce var is the same object")
+          (is (identical? state-atom @(fixture 'state)) "and keeps its state")
+          (is (= 1 @@(fixture 'state)))
+          (is (identical? shape-var (fixture 'Shape)) "the protocol var keeps its identity")
+          (is (identical? kept-var (fixture 'kept)) "a redefined var is the same Var")
+          (is (= :kept-2 ((fixture 'kept))) "with the new body")
+          (is (= 9 ((fixture 'area) ((fixture '->Sq) 3))) "the record still satisfies the protocol"))
+        (let [r (runner/check! target)]
+          (is (not (contains? r :unmapped)) "nothing more to unmap on the next check")))
+      (finally
+        (.delete f)
+        (remove-ns 'kaocha-sublime.unmap-fixture)))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-013
+(deftest only-vars-the-file-defined-are-unmapped
+  (let [reload-ns (create-ns 'kaocha-sublime.unmap-unit)
+        source (io/file "src/kaocha_sublime/unmap_unit.clj")]
+    (try
+      ;; What `def` leaves: a var whose :file is the resource path of the file that defined it.
+      (reset-meta! (intern reload-ns 'from-file 1) {:file "kaocha_sublime/unmap_unit.clj" :line 3})
+      (reset-meta! (intern reload-ns 'from-other 2) {:file "kaocha_sublime/other_part.clj" :line 9})
+      (intern reload-ns 'runtime 3)
+      (let [before (reload/interned-meta 'kaocha-sublime.unmap-unit)]
+        (is (= #{'from-file 'from-other 'runtime} (set (keys before))))
+        ;; A "reload" that redefines nothing:
+        (let [r (reload/unmap-stale! 'kaocha-sublime.unmap-unit before source)]
+          (is (= '[from-file] (mapv :var (:unmapped r))) "the file's own definition is unmapped")
+          (is (= '[from-other] (mapv :var (:kept r))) "a var another file defined is kept and listed")
+          (is (= 1 (:dynamic r)) "a runtime intern without :file is counted, never unmapped")
+          (is (nil? (ns-resolve reload-ns 'from-file)))
+          (is (some? (ns-resolve reload-ns 'from-other)))
+          (is (some? (ns-resolve reload-ns 'runtime)))))
+      (is (nil? (reload/interned-meta 'kaocha-sublime.no-such-namespace)))
+      (finally (remove-ns 'kaocha-sublime.unmap-unit)))))

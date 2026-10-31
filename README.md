@@ -151,7 +151,10 @@ namespaces before their test/dependent namespaces. It does not discover or
 reload unnamed dependents, repair retained object/Var references elsewhere, or
 attest a whole warm image. Reload-disabled namespaces refuse. Probe identity
 remains unknown; token acceptance still requires the independent image proof.
-Plain `require :reload` and the legacy adapter retain Clojure's stale-Var behavior.
+Plain `require :reload` and the legacy adapter retain Clojure's stale-Var behavior;
+`sublime-loop check` does not: after each closure namespace reloads, it unmaps the vars
+its file no longer defines (`kaocha-sublime.reload`, never `remove-ns`, so `defonce` state
+survives) and lists them in the receipt's `unmapped`.
 
 Hash equality alone never attests its already-loaded Vars. Watch binds candidate
 hashes to the actual namespace reload and observed generation. Inode change times
@@ -254,8 +257,9 @@ with one line naming both. `--repeat N` (1-50) reruns the selection N times in t
 (reloading the dependency closure only when files change) and adds `repeat`: a per-test
 tally and a verdict, `stable-pass`, `stable-fail` or `flaky`. `--perf` runs only `^:perf`
 test vars (of the named namespaces, else of every test namespace), never fail-fast, prints
-the load first and lists each duration in `perf-tests`. Field reference: docs/SETUP.md
-section 7.
+the load first and lists each duration in `perf-tests`. A definition deleted from a file is
+unmapped from the warm JVM at the next check and listed in `unmapped`. Field reference:
+docs/SETUP.md section 7.
 
 A repo needs no alias for the library. An optional `:sublime` alias carries only
 project extras (for example `:extra-paths ["dev"]`); see docs/SETUP.md. `bin/warm-jvm`

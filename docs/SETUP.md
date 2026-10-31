@@ -189,6 +189,14 @@ $KS/bin/test-focus --root server2 --aliases :run-tests:dev:test \
   `error: "no such test var: ..."`) before anything runs, and costs no restart.
 - Each check reloads the requested namespaces and their source dependencies (scanned
   in `src/` and `test/`), then runs exactly the named namespaces and vars through Kaocha.
+- A reload makes the warm image match the files: after each namespace reloads, the vars
+  its file used to define and no longer does (a deleted or moved `defn`, a deleted
+  `deftest`) are unmapped, before the namespaces that depend on it reload. Calling a
+  deleted function then fails warm exactly as it does cold, and a dependent that still
+  `:refer`s it fails at `stage: reload`. Nothing is `remove-ns`'d: `defonce` state and every
+  var the file still defines keep their identity. Vars without `:file` metadata (runtime
+  `intern`, stubs) are kept. The receipt lists what was removed in `unmapped`, each
+  `{"ns", "var", "at"}` (`at` is where the file used to define it).
 - stdout is exactly one JSON receipt. Exit code: `0` pass, `1` fail/stale/tainted,
   `2` unknown.
 - A failing receipt carries `failures`: one entry per failing or erroring assertion, in
@@ -343,7 +351,8 @@ Every command prints one `dev-loop.v1` JSON receipt and also writes it to
 Useful fields in a check receipt: `counts` (tests, assertions, pass, fail, error,
 skipped-by-focus), `failures` and `failures-omitted` (see section 7), `wall_s` (time for
 this check), `reload-targets` (namespaces reloaded), `path` (Kaocha run receipt, EDN),
-`checks` (the targets you named), `generation`, `load_1m` / `cpus` / `per_core` (load at the
+`checks` (the targets you named), `unmapped` (vars the reload removed because their file no
+longer defines them; section 7), `generation`, `load_1m` / `cpus` / `per_core` (load at the
 start) and `load_1m_end`, `slowest` (the N slowest test vars with `ms`), and with the
 matching option `repeat` (`--repeat`) or `perf-selected` / `perf-tests` (`--perf`); see
 section 7. A `fail` with `stage: focus` means a named test var does not exist, or (`--perf`)

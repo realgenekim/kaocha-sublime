@@ -24,6 +24,7 @@
   nil)
 
 ;; INTENT: AGENT-PROBE-RELOAD-017
+;; INTENT: LOOP-RELOAD-UNMAP-013
 (defn reload-probe!
   "Unload and reload explicit namespaces using the watcher's reload machinery.
   Callers supply dependencies before their dependents; this is not graph repair

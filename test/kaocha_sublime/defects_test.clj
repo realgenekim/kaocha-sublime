@@ -179,6 +179,7 @@
           {:path (:kaocha.plugin.run-receipt/path r)}))))
 
 ;; INTENT-TEST: AGENT-PROBE-RELOAD-017
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-013
 (deftest deleted-test-vars-do-not-survive-probes
   (let [dir (temp-dir) root (str dir "/test") file (str root "/probe_deleted_test.clj")
         cfg (assoc (config (str dir "/runs")) :kaocha/tests

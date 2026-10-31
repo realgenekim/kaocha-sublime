@@ -24,6 +24,7 @@
    [kaocha.testable :as testable]
    [kaocha-sublime.agent :as agent]
    [kaocha-sublime.probe :as probe]
+   [kaocha-sublime.reload :as reload]
    [nrepl.server :as nrepl]))
 
 (defonce identity-data
@@ -271,6 +272,14 @@
          (apply concat)
          (apply array-map))))
 
+(defn- unmapped-entry
+  "A var the reload unmapped, as receipt data: {:ns :var :at} where :at is where the
+  file used to define it (root-relative when found)."
+  [{:keys [ns var file line]}]
+  (let [f (when file (root-relative nil file))]
+    (->> [:ns (str ns) :var (str var) :at (when f (str f (when (and (integer? line) (pos? line)) (str ":" line))))]
+         (partition 2) (remove (comp nil? second)) (apply concat) (apply array-map))))
+
 ;; ---------------------------------------------------------------- timings
 
 (def slowest-default "How many of the slowest test vars a check receipt names." 5)
@@ -380,10 +389,18 @@
                ;; handing source namespaces to the probe as focus targets (CD variant):
                ;; edited sources are reloaded for certain, and the probe scope and its
                ;; receipt stay exactly the namespaces the caller asked for.
+               ;; INTENT: LOOP-RELOAD-UNMAP-013
+               ;; Each namespace is reloaded, then the vars its file no longer defines are
+               ;; unmapped (never remove-ns), before its dependents reload: a dependent that
+               ;; still refers a deleted var fails to load, as it would in a cold JVM.
+               unmapped (volatile! [])
                reload-error (reduce (fn [_ target]
-                                      (try (require target :reload) nil
+                                      (try (let [r (reload/reload! target (get (:files scanned) target))]
+                                             (vswap! unmapped into (:unmapped r)))
+                                           nil
                                            (catch Throwable t (reduced {:namespace target :error t}))))
-                                    nil targets)]
+                                    nil targets)
+               base (cond-> base (seq @unmapped) (assoc :unmapped (mapv unmapped-entry @unmapped)))]
            (if reload-error
              ;; No counts and never a pass: nothing ran. The failed namespace (and the
              ;; ones after it) keep their previous definitions until the next check, which

@@ -96,7 +96,7 @@
    :boundaries ["Missing cap" "Policy ceiling" "Unsafe ID" "Existing stream"]
    :tests [:heap-refusal-honors-launcher-id]
    :rationale "Item 4 launcher directory-diff workaround, records b3b02d33."}
-  {:id :AGENT-PROBE-RELOAD-017 :status :active
+  {:id :AGENT-PROBE-RELOAD-017 :status :superseded :superseded-by :LOOP-RELOAD-UNMAP-013
    :ears "The supported warm probe shall unload named namespaces before reloading, so deleted test Vars cannot survive as stale red or green."
    :misreadings ["require :reload removes definitions." "Reloading named namespaces attests all loaded dependencies."]
    :boundaries ["Deleted red Var" "Deleted green Var" "Missing namespace" "Dependency order" "Reload disabled"]
@@ -207,4 +207,11 @@
            :test_perf_may_name_no_namespace_and_asks_the_runner_for_perf_tests
            :test_no_perf_tests_is_a_focus_refusal_that_keeps_the_jvm_warm
            :test_perf_prints_the_load_first_and_needs_no_namespace]
-   :rationale "ks-wzy, 2026-10-31: promote the SETUP section 14 recipe (:skip-meta/:focus-meta [:perf]) into the tool."}]}
+   :rationale "ks-wzy, 2026-10-31: promote the SETUP section 14 recipe (:skip-meta/:focus-meta [:perf]) into the tool."}
+  {:id :LOOP-RELOAD-UNMAP-013 :status :active :supersedes :AGENT-PROBE-RELOAD-017
+   :ears "When a warm check reloads the dependency closure of its targets (every namespace of the closure, dependencies before dependents, with require :reload), then after each namespace reloads and before any dependent reloads, the runner shall ns-unmap exactly the vars interned in that namespace that its file used to define (their :file metadata names the namespace's file) and that this evaluation of the file did not define (their metadata map is the object recorded before the reload), and list each in the receipt's unmapped (ns, var, former file:line). It shall never remove-ns a namespace of the closure: defonce state and the identity of every var the file still defines (functions, protocols, multimethods) survive. Vars without :file metadata (runtime interns, stubs) and vars another file defined shall be kept. A failed reload shall unmap nothing. The supported probe shall continue to unload (remove-ns) and reload its named target namespaces through tools.namespace, so deleted test vars cannot survive as stale red or green."
+   :misreadings ["require :reload removes definitions the file no longer has." "remove-ns is the same repair with fewer steps." "A var still interned after a reload is still defined by the file." "Unmapping breaks compiled callers that hold the var." "Reloading named namespaces attests all loaded dependencies."]
+   :boundaries ["Deleted defn" "Deleted deftest in a source dependency" "defonce state" "Protocol and record still defined" "Runtime intern without :file" "Var defined by another file" "Failed reload" "Dependent that still refers the deleted var (fails to load, as cold)" "Probe target namespaces (remove-ns, unchanged)" "Deleted red Var" "Deleted green Var"]
+   :tests [:a-definition-deleted-from-its-file-is-unmapped-and-defonce-state-survives :only-vars-the-file-defined-are-unmapped
+           :deleted-test-vars-do-not-survive-probes]
+   :rationale "Item 1 of the reload-correctness batch, 2026-10-31: AGENT-PROBE-RELOAD-017 promised unloading, which only the probe's own target namespaces got (image/reload-probe!, tools.namespace remove-ns); every source namespace check! reloaded kept deleted definitions alive, a false green. Owner-approved target: unmap exactly what the file no longer defines, never remove-ns (keeps defonce state and protocol/record var identity)."}]}
