@@ -29,6 +29,9 @@
 # unmapped at the next check ("unmapped"); a reload that leaves mappings unlike the files (a
 # :refer that did not take after a move, a namespace still mapping a deleted var) fails at
 # stage stale-image with "stale" and stays warm; --repair-stale unmaps, reloads and re-checks.
+# A test that returns while background work it started is still running is reported in "leaks"
+# (and a LEAKS block on stderr); a failing test that started while it ran carries
+# "contaminated-by". --fail-on-leak makes each leak one failure of the leaking test.
 # Exit code is the check's: 0 pass, 1 fail/stale/tainted, 2 unknown.
 # Pass the same --root/--aliases you gave warm-jvm. Docs: docs/SETUP.md in this library.
 set -euo pipefail
@@ -43,7 +46,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "test-focus: $1 needs a value" >&2; exit 2; }
       checkflags+=("$1" "$2"); shift 2 ;;
     --perf) checkflags+=("$1"); perf=1; shift ;;
-    --repair-stale) checkflags+=("$1"); shift ;;
+    --repair-stale|--fail-on-leak) checkflags+=("$1"); shift ;;
     *) names+=("$1"); shift ;;
   esac
 done

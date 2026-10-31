@@ -833,6 +833,50 @@ class StaleImageTest(CheckTargetTest):
                                                          'now': "#'a.render/render"}]}})
         self.assertEqual("test-focus: repaired a.core/render: unmapped -> #'a.render/render\n", text)
 
+    # INTENT-TEST: LOOP-LEAK-VERDICT-010
+    def test_fail_on_leak_reaches_the_runner_only_when_asked(self):
+        loop = self.loop({'status': 'pass', 'counts': {'tests': 1}})
+        loop.command('check', ['a.core-test'])
+        loop.command('check', ['a.core-test'], {'fail_on_leak': True})
+        self.assertNotIn('fail-on-leak', self.sent[0])
+        self.assertIn(':fail-on-leak true}', self.sent[1])
+        self.assertTrue(cli.check_options(cli.parse(['--fail-on-leak', 'check', 'a.core-test']))['fail_on_leak'])
+
+
+class LeakRenderTest(unittest.TestCase):
+    RECEIPT = {'status': 'fail', 'stage': 'probe', 'counts': {'tests': 2, 'fail': 1, 'error': 0},
+               'leak-count': 1, 'leaks-omitted': 0, 'leak-check-ms': 0.02, 'leak-checked': 2,
+               'leaks': [{'test': 'a.render-test/never-renders-on-ui-thread',
+                          'pools': {'send-off': {'submitted': 2, 'in-flight': 1}},
+                          'threads': [{'name': 'clojure-agent-send-off-pool-3', 'state': 'RUNNABLE',
+                                       'at': 'a.render/run-current-render! (render.clj:168)'}]}],
+               'failures': [{'kind': 'fail', 'test': 'a.render-test/keeps-previous-image',
+                             'at': 'test/a/render_test.clj:40', 'message': 'the previous image stays up',
+                             'contaminated-by': 'a.render-test/never-renders-on-ui-thread',
+                             'contaminated-in-flight': 1}],
+               'failures-omitted': 0}
+
+    # INTENT-TEST: LOOP-LEAK-REPORT-009
+    def test_leaks_render_to_stderr_only(self):
+        text = cli.render_check(self.RECEIPT)
+        self.assertIn('test-focus: LEAKS 1 -- background work still running when a test returned', text)
+        self.assertIn('  LEAK a.render-test/never-renders-on-ui-thread  send-off: 1 in flight of 2 submitted', text)
+        self.assertIn('    running: clojure-agent-send-off-pool-3 at a.render/run-current-render! (render.clj:168)',
+                      text)
+        passing = cli.render_check(dict(self.RECEIPT, status='pass', failures=[], counts={'tests': 2}))
+        self.assertIn('LEAKS 1', passing, 'a leak is reported on a passing check too')
+
+    # INTENT-TEST: LOOP-LEAK-REPORT-009
+    def test_a_clean_check_has_no_leak_block(self):
+        self.assertEqual('', cli.render_leaks({'status': 'pass', 'leak-count': 0, 'leaks': []}))
+        self.assertEqual('', cli.render_leaks({'status': 'pass'}), 'an older runner without leak fields')
+
+    # INTENT-TEST: LOOP-LEAK-VERDICT-010
+    def test_a_contaminated_failure_names_the_suspect(self):
+        text = cli.render_failures(self.RECEIPT)
+        self.assertIn('  leak:     possibly by a.render-test/never-renders-on-ui-thread '
+                      '(1 task(s) still in flight when this test started)', text)
+
 
 # ---------------------------------------------------------------- ks-216, ks-mn0, ks-wzy
 
@@ -1069,6 +1113,12 @@ class TestFocusOptionsTest(unittest.TestCase):
         done, calls = self.run_focus('--repeat', '3', 'a.core-test', '--slowest', '9')
         self.assertEqual(0, done.returncode, done.stderr)
         self.assertEqual(['status', '--repeat 3 --slowest 9 check a.core-test'], calls)
+
+    # INTENT-TEST: LOOP-LEAK-VERDICT-010
+    def test_fail_on_leak_reaches_only_the_check(self):
+        done, calls = self.run_focus('--fail-on-leak', 'a.core-test')
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertEqual(['status', '--fail-on-leak check a.core-test'], calls)
 
     # INTENT-TEST: LOOP-STALE-REPAIR-012
     def test_repair_stale_reaches_only_the_check(self):

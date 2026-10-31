@@ -328,6 +328,33 @@ $KS/bin/test-focus --root server2 --aliases :run-tests:dev:test \
 
   `--repeat` and `--perf` combine: `test-focus --perf --repeat 3 my.app.render-test`.
 
+- Every check watches for background work a test leaves running when it returns (the
+  `kaocha.plugin.leak-detection` plugin, on leaf tests, `:each` fixtures inside the window,
+  no waiting). A leak never changes the verdict by default; it is reported in `leaks` and in
+  a stderr block on every check that has one, pass or fail:
+
+  ```text
+  test-focus: LEAKS 1 -- background work still running when a test returned
+    LEAK demo.race-test/a-leaker  send-off: 1 in flight of 1 submitted
+      running: clojure-agent-send-off-pool-0 at demo.race-test/fn--13625/fn--13626 (race_test.clj:11)
+
+  FAIL demo.race-test/b-victim  test/demo/race_test.clj:17
+    message:  the previous image stays up
+    expected: :clean
+    actual:   :leaked
+    leak:     possibly by demo.race-test/a-leaker (1 task(s) still in flight when this test started)
+  ```
+
+  A leak is a pool task the test submitted that is still active or queued while a pool
+  worker runs task code, or a thread born during the test and alive at its return. Idle pool
+  workers, threads named like lazily started JVM/Swing singletons (`AWT-`, `TimerQueue`,
+  `Java2D`, ...; extend with `:kaocha.plugin.leak-detection/allow-threads ["^my-pool-"]` in
+  `tests.edn`, counted in `allowed`) and tests tagged `^:kaocha.leak/allow` (counted in
+  `leaks-allowed`) are not charged. `--fail-on-leak` (or
+  `:kaocha.plugin.leak-detection/fail-on-leak true` in `tests.edn`) adds exactly one failure to
+  each leaking test. Not seen: virtual threads, work queued on a project's own long-lived
+  executor, `invokeLater` on the Swing EDT.
+
 The red-green loop: write the failing test, `test-focus` (expect `fail`, exit 1),
 make it pass, `test-focus` (expect `pass`, exit 0).
 
@@ -380,7 +407,13 @@ Useful fields in a check receipt: `counts` (tests, assertions, pass, fail, error
 skipped-by-focus), `failures` and `failures-omitted` (see section 7), `wall_s` (time for
 this check), `reload-targets` (namespaces reloaded), `path` (Kaocha run receipt, EDN),
 `checks` (the targets you named), `unmapped` (vars the reload removed because their file no
-longer defines them; section 7), `generation`, `load_1m` / `cpus` / `per_core` (load at the
+longer defines them; section 7), `stale` (below), `leaks` / `leak-count` / `leaks-omitted` /
+`leaks-allowed` (tests that returned with background work still running: each `test`,
+`pools` `{"send-off": {"submitted", "in-flight"}}`, `threads` and `new-threads` with `name`,
+`state`, `at`, and `allowed`), `leak-checked` and `leak-check-ms` (how many tests were
+watched and what watching cost), `contaminated-by` / `contaminated-in-flight` on a
+`failures` entry (a test that started while a leaker's work was still running),
+`generation`, `load_1m` / `cpus` / `per_core` (load at the
 start) and `load_1m_end`, `slowest` (the N slowest test vars with `ms`), and with the
 matching option `repeat` (`--repeat`) or `perf-selected` / `perf-tests` (`--perf`); see
 section 7. A `fail` with `stage: focus` means a named test var does not exist, or (`--perf`)
@@ -505,6 +538,15 @@ A test that waits until a stubbed render was *called* can end while the future t
 ```
 
 A 30 s deadline costs nothing when the condition holds quickly; a 2 s deadline fails on a busy machine.
+
+Every warm check now watches for this (section 7): a test that returns while a `future`/
+`send-off`/`send` task it submitted is still running, or while a thread it started is alive,
+is listed in `leaks` with what is still running and where, and a failing test that started
+while that work was in flight carries `contaminated-by`. A drain fixture runs inside the
+window, so a drained test reports clean: the detector shows the fix working. To ratchet the
+class once your tests drain, set `:kaocha.plugin.leak-detection/fail-on-leak true` in
+`tests.edn` (or pass `--fail-on-leak`). To get the same report from the cold gate, add
+`:kaocha.plugin/leak-detection` to `:plugins` in `tests.edn`; it needs only Kaocha.
 
 ### After moving functions between namespaces, call through the alias
 

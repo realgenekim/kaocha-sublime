@@ -383,6 +383,11 @@ def render_failures(receipt):
                 # A stale entry's message is the whole diagnosis and ends with the repair.
                 limit = 400 if item.get('kind') == 'stale' and key == 'message' else 200
                 out.append('  %-9s %s' % (key + ':', one_line(item[key], limit)))
+        if item.get('contaminated-by'):
+            # INTENT: LOOP-LEAK-VERDICT-010
+            n = item.get('contaminated-in-flight')
+            out.append('  %-9s possibly by %s (%s still in flight when this test started)' % (
+                'leak:', item['contaminated-by'], '%s task(s)' % n if n else 'its background work'))
         if item.get('output'):
             lines = item['output'].rstrip('\n').splitlines()
             out.append('  output:   (last %d of %d lines)' % (min(5, len(lines)), len(lines)))
@@ -467,11 +472,33 @@ def render_stale(receipt):
     return '\n'.join(out) + '\n' if out else ''
 
 
+# INTENT: LOOP-LEAK-REPORT-009
+def render_leaks(receipt):
+    """On any check (pass or fail) with leaks: each test that returned while its background
+    work was still running, what was still running, and where."""
+    count = receipt.get('leak-count') or 0
+    if not count:
+        return ''
+    out = ['test-focus: LEAKS %d -- background work still running when a test returned' % count]
+    for leak in receipt.get('leaks') or []:
+        parts = ['%s: %s in flight of %s submitted' % (pool, c.get('in-flight'), c.get('submitted'))
+                 for pool, c in sorted((leak.get('pools') or {}).items())]
+        parts += ['thread %s %s' % (t.get('name'), t.get('state')) for t in leak.get('new-threads') or []]
+        out.append('  LEAK %s  %s' % (leak.get('test'), '; '.join(parts)))
+        for t in (leak.get('threads') or []) + (leak.get('new-threads') or []):
+            if t.get('at'):
+                out.append('    running: %s at %s' % (t.get('name'), t.get('at')))
+    omitted = receipt.get('leaks-omitted') or 0
+    if omitted:
+        out.append('  ... %d more leaking tests not shown; see receipt leaks' % omitted)
+    return '\n'.join(out) + '\n'
+
+
 def render_check(receipt):
     """The whole stderr block of a check: load line, perf timings, repeat tally, stale image,
-    failures."""
+    leaks, failures."""
     return (render_load_line(receipt) + render_perf(receipt) + render_repeat(receipt) + render_stale(receipt)
-            + render_failures(receipt))
+            + render_leaks(receipt) + render_failures(receipt))
 
 
 # INTENT: LOOP-REPEAT-007
@@ -847,7 +874,7 @@ class Loop:
             return self.check(session, names, **(options or {}))
         raise RuntimeError('use up, status, check or down')
 
-    def run_once(self, session, names, reload, perf, slowest, timings, repair_stale=False):
+    def run_once(self, session, names, reload, perf, slowest, timings, repair_stale=False, fail_on_leak=False):
         """One runner check!: taint while in flight, untaint on a terminal result."""
         before = fingerprint(self.root)
         self.taint.write_text('check in flight; terminal result not yet received\n')
@@ -856,6 +883,9 @@ class Loop:
         if repair_stale:
             # INTENT: LOOP-STALE-REPAIR-012
             options = options[:-1] + ' :repair-stale true}'
+        if fail_on_leak:
+            # INTENT: LOOP-LEAK-VERDICT-010
+            options = options[:-1] + ' :fail-on-leak true}'
         receipt = self.evaluate(session, '(' + RUNNER_NS + '/check! ' + json.dumps(names) + ' ' + options + ')')
         after = fingerprint(self.root)
         # A focus refusal (a named test var does not exist, or no ^:perf var) comes after
@@ -881,7 +911,8 @@ class Loop:
                 receipt['failures'] = failures
         return receipt, before, after, terminal
 
-    def check(self, session, names, repeat=1, perf=False, slowest=SLOWEST_DEFAULT, repair_stale=False):
+    def check(self, session, names, repeat=1, perf=False, slowest=SLOWEST_DEFAULT, repair_stale=False,
+              fail_on_leak=False):
         if (not names and not perf) or any(not valid_target(n) for n in names):
             raise RuntimeError('name explicit test namespaces or test vars: sublime-loop check '
                                'project.core-test project.db-test/reads-rows')
@@ -895,16 +926,17 @@ class Loop:
             raise RuntimeError('runner or dependencies changed; run sublime-loop down then up')
         self.require_aliases(session)
         if repeat == 1:
-            receipt, before, _, _ = self.run_once(session, names, True, perf, slowest, False, repair_stale)
+            receipt, before, _, _ = self.run_once(session, names, True, perf, slowest, False, repair_stale,
+                                                  fail_on_leak)
         else:
-            receipt, before = self.repeat(session, names, repeat, perf, slowest, repair_stale)
+            receipt, before = self.repeat(session, names, repeat, perf, slowest, repair_stale, fail_on_leak)
         receipt.update(source=before, generation=session['generation'],
                        checks=names, verification_complete=False,
                        proof_pending=['final candidate required gates'])
         return receipt
 
     # INTENT: LOOP-REPEAT-007
-    def repeat(self, session, names, n, perf, slowest, repair_stale=False):
+    def repeat(self, session, names, n, perf, slowest, repair_stale=False, fail_on_leak=False):
         """Run the same check n times in this JVM. Only the first run reloads the dependency
         closure, unless the source fingerprint changed since that reload (the probe itself
         always reloads the target test namespaces, so state held there starts fresh). Stops early when a run gives no
@@ -919,7 +951,7 @@ class Loop:
             # edit that landed while the previous run was in flight.
             reload = index == 0 or fingerprint(self.root) != loaded
             receipt, before, after, terminal = self.run_once(session, names, reload, perf, slowest, True,
-                                                             repair_stale)
+                                                             repair_stale, fail_on_leak)
             if first is None:
                 first = before
             if reload:
@@ -969,6 +1001,9 @@ def parse(argv):
     parser.add_argument('--repair-stale', action='store_true',
                         help='check: when the reload leaves a stale image (a refer that did not take, a '
                              'namespace mapping a deleted var), ns-unmap, reload again and re-check')
+    parser.add_argument('--fail-on-leak', action='store_true',
+                        help='check: a test that returns while its background work is still running '
+                             'fails (default: reported, verdict unchanged)')
     parser.add_argument('command', nargs='?', default='status')
     parser.add_argument('names', nargs='*')
     return parser.parse_args(argv)
@@ -984,6 +1019,8 @@ def check_options(args):
     out['perf'] = bool(args.perf)
     if args.repair_stale:
         out['repair_stale'] = True
+    if args.fail_on_leak:
+        out['fail_on_leak'] = True
     return out
 
 

@@ -262,7 +262,11 @@ unmapped from the warm JVM at the next check and listed in `unmapped`; a reload 
 mappings unlike the files (a `:refer` that did not take after a move, a namespace still
 mapping a deleted var) fails at `stage: stale-image` with `kind: stale` failures and a
 `stale` map, never `pass`, and keeps the JVM warm; `--repair-stale` unmaps, reloads and
-re-checks inside the closure. Field reference:
+re-checks inside the closure. Every check also reports `leaks` (tests that returned while
+background work they started was still running, with what and where) and marks a failing
+test that started during it with `contaminated-by`; `--fail-on-leak` makes each leak a
+failure. Projects can enable `:kaocha.plugin/leak-detection` in `tests.edn` for the cold
+gate too. Field reference:
 docs/SETUP.md section 7.
 
 A repo needs no alias for the library. An optional `:sublime` alias carries only

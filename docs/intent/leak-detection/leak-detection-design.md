@@ -3,7 +3,7 @@ parent: high-level-design
 topic: leak-detection
 bead: ks-2u5
 intents: [LOOP-LEAK-REPORT-009, LOOP-LEAK-VERDICT-010]
-status: proposed
+status: implemented
 ---
 
 # Leak detection: background work a test leaves running, charged to that test
@@ -202,6 +202,24 @@ IDs continue after the highest `LOOP-*` number present in the working tree (`LOO
  :tests [:a-failing-test-that-inherited-in-flight-work-is-marked-contaminated :fail-on-leak-adds-one-fail-event-and-nothing-else-changes]
  :rationale "Tenet 1 protects provable verdicts; the leaker's verdict is provable, the neighbour's is at risk. Naming the suspect beside the victim's failure is what ends the dig."}
 ```
+
+## Implementation notes (2026-10-31)
+
+- Plugin: `src/kaocha/plugin/leak_detection.clj`, `:kaocha.plugin/leak-detection`, Kaocha
+  only (no nREPL/tools.namespace), on by default in `check!` in warn mode.
+- **Pool leaks need a second observation**: the approximate counters (`active + queued`
+  grew, something was submitted) and at least one pool worker whose stack has a frame
+  outside the JVM/Clojure/Kaocha/nREPL libraries at that moment. A drain fixture whose
+  counter is decremented at the very end of the future body otherwise races the counter
+  read. This answers open question 1 for the first increment; it is not a wait.
+- Strict mode reports its one `:fail` event through `clojure.test/do-report` (with
+  fail-fast off for that call), so the agent event stream, the Kaocha receipt totals and
+  `failures` agree (AGENT-ARITHMETIC-018).
+- Not done in this increment: the `:leaks` key on Kaocha run-receipt test outcomes,
+  `flaky (contaminated)` in repeat mode, `:grace-ms`, the EDT and CPU-time probes.
+- **Measured**: clean path 4-15 µs per test in isolation, 8-17 µs per test in situ (200
+  trivial tests, generated project, load 2.4-3 per core); a found leak adds a thread dump,
+  a few ms (19 ms on a fresh JVM).
 
 ## Open questions
 

@@ -10,7 +10,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.namespace.parse :as parse])
-  (:import (java.io File PushbackReader StringWriter Writer)
+  (:import (java.io File StringWriter Writer)
            (java.util IdentityHashMap)))
 
 ;; ---------------------------------------------------------------- declared refers

@@ -6,8 +6,11 @@
   Contract with bin/sublime-loop:
   - `identity-data` {:root :pid :generation :role \"test-only\"}
   - `(check! [\"ns-name\" ...])` -> {:status \"pass\"|\"fail\"|\"unknown\" :counts ...}
-    (a failed reload adds :reload-failure, :not-reloaded and :jvm-usable)
-  - `(check! names {:reload bool :perf bool :slowest n :timings bool})` the same, with
+    (a failed reload adds :reload-failure, :not-reloaded and :jvm-usable; a reload adds
+    :unmapped and :stale, and a stale image fails at :stage \"stale-image\"; a run adds
+    :leaks :leak-count :leak-check-ms :leak-checked)
+  - `(check! names {:reload bool :perf bool :slowest n :timings bool :repair-stale bool
+    :fail-on-leak bool})` the same, with
     options (see `check!`); a run adds :slowest, and :test-timings / :perf-tests on request
   - `(write-json value)` -> JSON string (the CLI's transport receipt encoder)
   - `-main` writes `.dev-loop/session.json` atomically once nREPL listens."
@@ -20,6 +23,7 @@
    [clojure.tools.namespace.dir :as scan]
    [clojure.tools.namespace.track :as track]
    [kaocha.hierarchy :as hierarchy]
+   [kaocha.plugin.leak-detection :as leak]
    [kaocha.config :as config]
    [kaocha.testable :as testable]
    [kaocha-sublime.agent :as agent]
@@ -176,6 +180,9 @@
       (str (.relativize (.toPath root) (.toPath found)))
       (or file meta-file))))
 
+(defn- test-name* [id]
+  (if (and (keyword? id) (namespace id)) (str (namespace id) "/" (name id)) (some-> id name)))
+
 (defn- failure-entry [node e]
   (let [id (:kaocha.testable/id node)
         m (:kaocha.testable/meta node)
@@ -204,7 +211,10 @@
           :actual (cond (instance? Throwable actual) (throwable-text actual)
                         eq (bounded-pr-str (second eq))
                         (contains? e :actual) (bounded-pr-str actual))
-          :output (tail (:kaocha.plugin.capture-output/output node) output-limit)]
+          :output (tail (:kaocha.plugin.capture-output/output node) output-limit)
+          ;; INTENT: LOOP-LEAK-VERDICT-010
+          :contaminated-by (some-> (::leak/contaminated-by node) test-name*)
+          :contaminated-in-flight (when (::leak/contaminated-by node) (get-in node [::leak/inherited :in-flight]))]
          (partition 2)
          (remove (fn [[_ v]] (or (nil? v) (= "" v))))
          (apply concat)
@@ -439,6 +449,27 @@
      :failures (vec (concat (map #(stale-failure files :refer %) (:refers final))
                             (map #(stale-failure files :referrer %) (:referrers final))))}))
 
+;; ---------------------------------------------------------------- leaks
+
+;; INTENT: LOOP-LEAK-REPORT-009
+(defn leak-details
+  "Leaks in a Kaocha result tree (kaocha.plugin.leak-detection), in run order:
+  {:leaks [first `failure-limit` records] :leaks-omitted n :leak-count n
+  :leaks-allowed n (opted out with ^:kaocha.leak/allow) :leak-check-ms total
+  :leak-checked n (leaf tests observed)}."
+  [result]
+  (let [leaves (filter #(contains? % ::leak/check-nanos) (testable/test-seq result))
+        records (keep leak/leak-record leaves)
+        counted (remove :opted-out records)
+        shown (vec (take failure-limit counted))
+        nanos (reduce + (map ::leak/check-nanos leaves))]
+    (cond-> {:leaks shown
+             :leaks-omitted (- (count counted) (count shown))
+             :leak-count (count counted)
+             :leak-check-ms (/ (Math/round (/ (double nanos) 1e4)) 100.0)
+             :leak-checked (count leaves)}
+      (seq (filter :opted-out records)) (assoc :leaks-allowed (count (filter :opted-out records))))))
+
 ;; ---------------------------------------------------------------- timings
 
 (def slowest-default "How many of the slowest test vars a check receipt names." 5)
@@ -518,7 +549,11 @@
   :perf true runs only the ^:perf test vars of the targets (all of the default suite's
   test namespaces when none are named), un-skipping :perf, and adds :perf-tests;
   :slowest n names the n slowest test vars (default `slowest-default`); :timings true
-  adds :test-timings, every var that ran with its outcome and duration."
+  adds :test-timings, every var that ran with its outcome and duration; :repair-stale
+  true repairs a stale image inside the closure (default: tests.edn's
+  :kaocha-sublime/repair-stale, else off); :fail-on-leak true makes each leak one
+  failure of the leaking test (default: tests.edn's
+  :kaocha.plugin.leak-detection/fail-on-leak, else warn)."
   ([namespaces] (check! namespaces {}))
   ([namespaces {:keys [reload perf timings] :or {reload true} :as opts}]
    (locking runner-lock
@@ -615,14 +650,19 @@
 
                  :else
                  (let [result (probe/run (if perf selected requested)
-                                         (cond-> {:plugins [:kaocha.plugin/filter :kaocha.plugin/run-receipt
+                                         (cond-> {:plugins [:kaocha.plugin/filter
+                                                            ;; INTENT: LOOP-LEAK-REPORT-009
+                                                            :kaocha.plugin/leak-detection
+                                                            :kaocha.plugin/run-receipt
                                                             :kaocha.plugin/profiling]
                                                   :kaocha.plugin.profiling/profiling? false
                                                   :kaocha.plugin.run-receipt/dir ".dev-loop/kaocha-runs"
                                                   :kaocha.plugin.run-receipt/include-tests? true
                                                   ;; Never fail-fast: every timing and every flake is reported.
                                                   :kaocha/fail-fast? false}
-                                           perf (assoc :kaocha-sublime.probe/allow-meta [:perf])))
+                                           perf (assoc :kaocha-sublime.probe/allow-meta [:perf])
+                                           ;; INTENT: LOOP-LEAK-VERDICT-010
+                                           (:fail-on-leak opts) (assoc ::leak/fail-on-leak true)))
                        receipt (when (:path result) (edn/read-string (slurp (:path result))))
                        counts (:totals receipt)
                        details (try (some-> (:result result) failure-details)
@@ -630,8 +670,9 @@
                                       {:failures [{:kind "error" :test "kaocha-sublime.runner/failure-details"
                                                    :message (str "could not build failure details: " (.getMessage t))}]
                                        :failures-omitted 0}))
-                       timed (try (some-> (:result result) test-timings) (catch Throwable _ nil))]
-                   (cond-> (assoc (merge base (when (seq (:failures details)) details))
+                       timed (try (some-> (:result result) test-timings) (catch Throwable _ nil))
+                       leaks (try (some-> (:result result) leak-details) (catch Throwable _ nil))]
+                   (cond-> (assoc (merge base (when (seq (:failures details)) details) leaks)
                                   ;; probe exit 0 already requires complete coverage and >0 tests
                                   ;; (protocol/outcome), which subsumes the template's count>0 guard.
                                   :status (case (:exit result) 0 "pass" 1 "fail" "unknown")
