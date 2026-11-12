@@ -32,12 +32,12 @@ The library brings them.
 | Machine | Path |
 |---|---|
 | Laptop (skiff) | `~/src.local/kaocha-sublime` |
-| Buster / anvil | `/home/forge/src/kaocha-sublime` |
+| Buster / Anvil (every seat, every Unix user) | `~/src/kaocha-sublime`, your own clone: `git clone https://github.com/realgenekim/kaocha-sublime ~/src/kaocha-sublime` (public repo; no shared path, because seats run as different users and cannot read each other's homes) |
 
 Call the scripts by absolute path, or put `bin/` on your `PATH`:
 
 ```sh
-KS=~/src.local/kaocha-sublime            # or /home/forge/src/kaocha-sublime
+KS=~/src.local/kaocha-sublime            # or ~/src/kaocha-sublime on Buster/Anvil
 $KS/bin/warm-jvm --root .
 
 # optional, in your shell profile
