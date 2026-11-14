@@ -260,17 +260,22 @@
         target ["kaocha-sublime.unmap-fixture/absent"]
         fixture #(ns-resolve 'kaocha-sublime.unmap-fixture %)]
     (try
-      (spit f (str unmap-header "(defn gone [] :old)\n(defn kept [] :kept)\n(deftest deleted-test (is true))\n"))
+      (spit f (str unmap-header "(defn gone [] :old)\n(defn kept [] :kept)\n(deftest deleted-test (is true))\n(defn start! [] (def client :connected))\n"))
       (is (= "focus" (:stage (runner/check! target))))
       (is (= :old ((fixture 'gone))))
+      ((fixture 'start!))
       (swap! @(fixture 'state) inc)
       (let [state-atom @(fixture 'state)
             state-var (fixture 'state)
             shape-var (fixture 'Shape)
             kept-var (fixture 'kept)]
-        (spit f (str unmap-header "(defn kept [] :kept-2)\n"))
+        (spit f (str unmap-header "(defn kept [] :kept-2)\n(defn start! [] (def client :connected))\n"))
         (let [r (runner/check! target)]
           (is (= "focus" (:stage r)) "the reload succeeded")
+          (is (some #(and (= "client" (:var %)) (= "still-in-file" (:reason %))) (:kept r))
+              "the kept reason reaches the public receipt")
+          (is (not-any? #(= "client" (:var %)) (get-in r [:stale :defs]))
+              "a retained definition is not a stale-definition warning")
           (is (nil? (fixture 'gone)) "the deleted function's var is gone")
           (is (thrown? Exception (eval '(kaocha-sublime.unmap-fixture/gone)))
               "calling it fails, as in a cold JVM")
@@ -297,10 +302,11 @@
 ;; INTENT-TEST: LOOP-RELOAD-UNMAP-013
 (deftest only-vars-the-file-defined-are-unmapped
   (let [reload-ns (create-ns 'kaocha-sublime.unmap-unit)
-        source (io/file "src/kaocha_sublime/unmap_unit.clj")]
+        source (.getCanonicalFile (java.io.File/createTempFile "unmap-unit-" ".clj"))]
     (try
+      (spit source "")
       ;; What `def` leaves: a var whose :file is the resource path of the file that defined it.
-      (reset-meta! (intern reload-ns 'from-file 1) {:file "kaocha_sublime/unmap_unit.clj" :line 3})
+      (reset-meta! (intern reload-ns 'from-file 1) {:file (.getPath source) :line 3})
       (reset-meta! (intern reload-ns 'from-other 2) {:file "kaocha_sublime/other_part.clj" :line 9})
       (intern reload-ns 'runtime 3)
       (let [before (reload/interned-meta 'kaocha-sublime.unmap-unit)]
@@ -314,4 +320,141 @@
           (is (some? (ns-resolve reload-ns 'from-other)))
           (is (some? (ns-resolve reload-ns 'runtime)))))
       (is (nil? (reload/interned-meta 'kaocha-sublime.no-such-namespace)))
-      (finally (remove-ns 'kaocha-sublime.unmap-unit)))))
+      (finally (.delete source) (remove-ns 'kaocha-sublime.unmap-unit)))))
+
+(defn- with-source [text f]
+  (let [source (.getCanonicalFile (java.io.File/createTempFile "reload-014-" ".clj"))
+        ns-sym (gensym "reload-014-")
+        ns (create-ns ns-sym)]
+    (try
+      (binding [*ns* ns]
+        (clojure.core/refer 'clojure.core)
+        (spit source text)
+        (load-file (.getPath source))
+        (f ns-sym source))
+      (finally (.delete source) (remove-ns ns-sym)))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+(deftest a-def-inside-a-function-body-survives-a-reload
+  (with-source "(defn start! [] (def ^:private client :connected))\n(defonce state (atom 1))"
+    (fn [ns-sym source]
+      ;; Compilation interns client even though start! has never run.
+      (let [client (ns-resolve ns-sym 'client)
+            state @(ns-resolve ns-sym 'state)
+            before (reload/interned-meta ns-sym)]
+        (load-file (.getPath source))
+        (let [r (reload/unmap-stale! ns-sym before source)]
+          (is (identical? client (ns-resolve ns-sym 'client)))
+          (is (empty? (:unmapped r)))
+          (is (identical? state @(ns-resolve ns-sym 'state))))
+        ((ns-resolve ns-sym 'start!))
+        (let [before (reload/interned-meta ns-sym)]
+          (load-file (.getPath source))
+          (let [r (reload/unmap-stale! ns-sym before source)]
+            (is (some #(and (= 'client (:var %)) (= :still-in-file (:reason %))) (:kept r))))
+          (is (= :connected @(ns-resolve ns-sym 'client))))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+(deftest a-deleted-definition-is-still-unmapped
+  (with-source "(defn gone [] :old)"
+    (fn [ns-sym source]
+      (let [before (reload/interned-meta ns-sym)]
+        (spit source "")
+        (is (= '[gone] (mapv :var (:unmapped (reload/unmap-stale! ns-sym before source)))))
+        (is (nil? (ns-resolve ns-sym 'gone)))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+(deftest a-mentioned-but-undefined-symbol-is-still-unmapped
+  (with-source "(def gone 1)"
+    (fn [ns-sym source]
+      (let [before (reload/interned-meta ns-sym)]
+        (spit source "(comment gone)\n'(gone)\n::keyword")
+        (is (= '[gone] (mapv :var (:unmapped (reload/unmap-stale! ns-sym before source)))))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+(deftest an-unreadable-file-unmaps-nothing
+  (with-source "(def one 1) (def two 2)"
+    (fn [ns-sym source]
+      (let [before (reload/interned-meta ns-sym)
+            err (java.io.StringWriter.)]
+        (spit source "(def broken")
+        (let [r (binding [*err* err] (reload/unmap-stale! ns-sym before source))]
+          (is (empty? (:unmapped r)))
+          (is (every? #(ns-resolve ns-sym %) '[one two]))
+          (is (= 1 (count (str/split-lines (str err)))))
+          (is (str/includes? (str err) (str ns-sym))))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+(deftest source-definitions-are-read-once-and-only-for-candidates
+  (with-source ""
+    (fn [ns-sym source]
+      (let [names '[a b c d e f g h i j k l]
+            reader io/reader
+            reads (atom 0)]
+        (doseq [sym names]
+          (reset-meta! (intern (find-ns ns-sym) sym 1) {:file (.getPath source)}))
+        (spit source "[{:nested (fn [] (def ^String a nil))}]\n(defonce b nil)\n(defn c [])\n(defn- d [])\n(defmacro e [])\n(defmulti f identity)\n(declare g h)\n#?(:clj (deftest i))\n(defprotocol j)\n(defrecord k [])\n(deftype l [])\n::qualified")
+        (with-redefs [io/reader (fn [& args] (swap! reads inc) (apply reader args))]
+          (reload/unmap-stale! ns-sym {} source)
+          (is (zero? @reads) "no source read without candidates")
+          (let [r (reload/unmap-stale! ns-sym (reload/interned-meta ns-sym) source)]
+            (is (= 1 @reads) "one read shared by all candidates")
+            (is (empty? (:unmapped r)))
+            (is (= (set names) (set (map :var (:kept r)))))
+            (is (every? #(= :still-in-file (:reason %)) (:kept r)))))
+        (spit source "#=(throw (Exception. \"must never evaluate\"))")
+        (let [err (java.io.StringWriter.)
+              r (binding [*err* err]
+                  (reload/unmap-stale! ns-sym (reload/interned-meta ns-sym) source))]
+          (is (empty? (:unmapped r)) "read-eval is disabled")
+          (is (= 1 (count (str/split-lines (str err))))))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+(deftest macro-made-vars-survive-a-reload
+  (with-source "(defrecord Foo [x])
+(deftype Bar [x])
+(defprotocol Ping (ping [this]))
+(defmacro def-state [n] `(def ~n (atom 1)))
+(def-state state)
+(defmacro def-something [n] `(defn ~n [] :project))
+(def-something project-made)"
+    (fn [ns-sym source]
+      (let [names '[->Foo map->Foo ->Bar Ping ping state project-made]
+            vars (mapv #(ns-resolve ns-sym %) names)
+            before (reload/interned-meta ns-sym)]
+        (load-file (.getPath source))
+        (let [r (reload/unmap-stale! ns-sym before source)]
+          (is (empty? (:unmapped r)))
+          (doseq [[sym v] (map vector names vars)]
+            (is (some? v) (str sym))
+            (is (identical? v (ns-resolve ns-sym sym)) (str sym)))
+          (is (= {:x 7} (into {} ((ns-resolve ns-sym '->Foo) 7))))
+          (is (= {:x 8} (into {} ((ns-resolve ns-sym 'map->Foo) {:x 8}))))
+          (is (some? ((ns-resolve ns-sym '->Bar) 9)))
+          (is (= 1 @@(ns-resolve ns-sym 'state)))
+          (is (= :project ((ns-resolve ns-sym 'project-made)))))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+(deftest an-interned-var-survives-a-reload
+  (with-source "(defn start! [] (intern *ns* 'runtime-value :connected))"
+    (fn [ns-sym source]
+      ((ns-resolve ns-sym 'start!))
+      (let [v (ns-resolve ns-sym 'runtime-value)
+            before (reload/interned-meta ns-sym)]
+        (is (nil? (:file (meta v))))
+        (load-file (.getPath source))
+        (let [r (reload/unmap-stale! ns-sym before source)]
+          (is (= 1 (:dynamic r)))
+          (is (identical? v (ns-resolve ns-sym 'runtime-value)))
+          (is (= :connected @v)))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+(deftest the-first-reload-after-start-unmaps-a-deleted-definition
+  (with-source "(defn gone [] :old)"
+    (fn [ns-sym source]
+      (spit source "")
+      ;; No prior reload/unmap call or previous-source cache exists.
+      (let [before (reload/interned-meta ns-sym)]
+        (load-file (.getPath source))
+        (is (= '[gone] (mapv :var (:unmapped (reload/unmap-stale! ns-sym before source)))))
+        (is (nil? (ns-resolve ns-sym 'gone)))))))

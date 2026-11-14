@@ -7,12 +7,14 @@
   `def` (defn, def, declare, defonce, defmulti, defprotocol, defrecord, deftest ...) a
   fresh metadata map each time the form is evaluated, so a var whose metadata map is
   the very object it was before the reload was not defined by this evaluation of the
-  file. Those vars, when their :file names this namespace's file, are unmapped.
+  file. Those vars are unmapped only when the file no longer names a definition.
 
   Never remove-ns: defonce state, protocol vars and every var the file still defines
-  keep their identity (compiled callers hold Var objects).")
+  keep their identity (compiled callers hold Var objects)."
+  (:require
+   [clojure.java.io :as io]))
 
-;; INTENT: LOOP-RELOAD-UNMAP-013
+;; INTENT: LOOP-RELOAD-UNMAP-014
 (defn interned-meta
   "{sym metadata-map} for every var interned in the namespace named `ns-sym`, nil when
   the namespace does not exist. Reads the namespace's mappings directly (no ns-interns
@@ -40,12 +42,38 @@
              (or (= path rel)
                  (.endsWith (.replace path \\ \/) (str "/" rel)))))))
 
-;; INTENT: LOOP-RELOAD-UNMAP-013
+(defn- file-definitions
+  "Names of defining forms at any depth; nil on read failure (never evidence to unmap)."
+  [ns source]
+  (try
+    (binding [*read-eval* false *ns* ns]
+      (with-open [reader (java.io.PushbackReader. (io/reader source))]
+        (loop [names #{}]
+          (let [form (read {:read-cond :allow :eof ::eof} reader)]
+            (if (= ::eof form)
+              names
+              (recur
+                (reduce (fn [acc node]
+                          (if (and (seq? node) (symbol? (first node)))
+                            (let [head (name (first node))
+                                  defs (cond
+                                         (= head "declare") (rest node)
+                                         (.startsWith head "def") [(second node)])]
+                              (into acc (comp (filter symbol?) (map #(with-meta % nil))) defs))
+                            acc))
+                        names (tree-seq coll? seq form))))))))
+    (catch Exception _
+      (binding [*out* *err*]
+        (println (str "reload: cannot read source forms for " (ns-name ns) "; unmapping nothing")))
+      nil)))
+
+;; INTENT: LOOP-RELOAD-UNMAP-014
 (defn unmap-stale!
   "After a successful reload of `ns-sym`, given `before` (its `interned-meta` taken just
   before the reload) and `source` (its file, or nil): every var still interned whose
   metadata map is identical to the one recorded was not defined by the reload.
-  - its :file names `source` (the file used to define it): ns-unmap it -> :unmapped
+  - its :file names `source`: keep if the file still defines it, otherwise -> :unmapped
+  - unreadable source: keep every candidate, with one stderr warning for the namespace
   - it has another real :file (defined into this namespace by some other file): keep -> :kept
   - no :file (runtime intern, stub, protocol method var): keep, counted in :dynamic
   Entries are {:ns :var :file :line :var <the Var object>}; :var-object is for the
@@ -53,7 +81,8 @@
   [ns-sym before ^java.io.File source]
   (let [ns (find-ns ns-sym)
         ;; A file-system call: made only once a var turns out not to be redefined.
-        source (delay (some-> source .getCanonicalFile))]
+        source (delay (some-> source .getCanonicalFile))
+        definitions (delay (file-definitions ns @source))]
     (reduce-kv
      (fn [acc sym m]
        (let [v (when ns (.getMapping ^clojure.lang.Namespace ns sym))]
@@ -62,14 +91,18 @@
                   (identical? m (meta v)))
            (let [entry {:ns ns-sym :var sym :file (:file m) :line (:line m) :var-object v}]
              (cond
-               (file-names? (:file m) @source) (do (ns-unmap ns sym) (update acc :unmapped conj entry))
+                (file-names? (:file m) @source)
+                (cond
+                  (nil? @definitions) (update acc :kept conj (assoc entry :reason :unreadable-file))
+                  (contains? @definitions sym) (update acc :kept conj (assoc entry :reason :still-in-file))
+                  :else (do (ns-unmap ns sym) (update acc :unmapped conj entry)))
                (and (string? (:file m)) (not= "NO_SOURCE_PATH" (:file m))) (update acc :kept conj entry)
                :else (update acc :dynamic inc)))
            acc)))
      {:unmapped [] :kept [] :dynamic 0}
      (or before {}))))
 
-;; INTENT: LOOP-RELOAD-UNMAP-013
+;; INTENT: LOOP-RELOAD-UNMAP-014
 (defn reload!
   "(require ns-sym :reload), then unmap the vars the file used to define and no longer
   does (`unmap-stale!`). Throws what require throws; a failed reload unmaps nothing (a
