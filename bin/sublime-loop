@@ -628,10 +628,20 @@ def probe_budget(per_core):
             'backoff_s': [min(4, 2 ** n) for n in range(attempts - 1)]}
 
 
+# The run budget: RUN_BASE_S on an idle machine, scaling with the 1-minute load per core by
+# the probe's rule (1 + load), capped at exactly RUN_MAX_S. The ceiling is stated here rather
+# than inherited from the probe's PROBE_SCALE_MAX, so the cap is the promised 600 s whatever
+# the probe's own scale becomes.
+RUN_BASE_S = 120
+RUN_MAX_S = 600
+RUN_SCALE_MAX = RUN_MAX_S / RUN_BASE_S
+
+
 # INTENT: LOOP-RUN-BUDGET-016
 def run_budget(per_core, timeout=None):
     busy = 1.0 if per_core is None else max(0.0, per_core)
-    return {'seconds': timeout if timeout is not None else min(600, 120 * min(PROBE_SCALE_MAX, 1 + busy)),
+    scaled = int(min(RUN_MAX_S, RUN_BASE_S * min(RUN_SCALE_MAX, 1 + busy)))
+    return {'seconds': timeout if timeout is not None else scaled,
             'source': 'explicit' if timeout is not None else 'scaled',
             'per_core_start': per_core}
 
@@ -646,29 +656,53 @@ def positive_timeout(value):
     raise argparse.ArgumentTypeError('--timeout must be a positive number')
 
 
+# The library checkout cannot change under one run, so its two git calls are made once per
+# process (a receipt is assembled more than once per run). Keyed by the checkout, and a test
+# that edits a checkout in-process clears it.
+RUNNER_GIT_CACHE = {}
+
+
+def runner_git_facts():
+    """{'commit', 'status'} of the library checkout, or None values outside git. Cached."""
+    facts = RUNNER_GIT_CACHE.get(str(LIBRARY))
+    if facts is None:
+        def git(*args):
+            try:
+                result = subprocess.run(['git', '-C', str(LIBRARY), *args],
+                                        capture_output=True, text=True, timeout=10)
+                return result.stdout.strip() if result.returncode == 0 else None
+            except (OSError, subprocess.SubprocessError):
+                return None
+        facts = {'commit': git('rev-parse', '--short', 'HEAD'), 'status': git('status', '--porcelain')}
+        RUNNER_GIT_CACHE[str(LIBRARY)] = facts
+    return facts
+
+
 # INTENT: LOOP-RUNNER-VERSION-017
-def runner_version(root, jvm_commit=None):
-    def git(*args):
-        try:
-            result = subprocess.run(['git', '-C', str(LIBRARY), *args],
-                                    capture_output=True, text=True, timeout=10)
-            return result.stdout.strip() if result.returncode == 0 else None
-        except (OSError, subprocess.SubprocessError):
-            return None
-    commit = git('rev-parse', '--short', 'HEAD')
-    status = git('status', '--porcelain')
+def runner_version(jvm_commit=None):
+    """The commit the bin scripts ran from, whether that checkout is dirty, and the commit
+    the warm JVM was started from. The project root does not enter it: this describes the
+    library checkout (LIBRARY), which is the only thing the scripts run from."""
+    facts = runner_git_facts()
+    commit, status = facts['commit'], facts['status']
     return {'commit': commit, 'dirty': None if status is None else bool(status),
             'jvm_commit': jvm_commit,
             'drift': bool(commit and jvm_commit and commit != jvm_commit)}
 
 
 # INTENT: LOOP-RUN-BUDGET-016
+# Only a focused check waits for a run budget, and only it reports progress while it waits.
+# Every other nREPL round trip (the identity probe, anything a later caller adds) keeps this
+# fixed wait, so "the probe's budget is the run's budget" stays a misreading of the rule.
+DEFAULT_EVAL_TIMEOUT_S = 120
 RUN_PROGRESS_AFTER_S = 120
 RUN_PROGRESS_INTERVAL_S = 60
 
 
 def run_with_progress(command, budget, **kwargs):
-    """Keep the transport wait bounded while reporting long focused checks live."""
+    """Keep the transport wait bounded while reporting long focused checks live. The line's
+    literal prefix ('test-focus: check still running;') is what bin/test-focus matches to
+    stream it live instead of holding it in the failure block; keep the two in step."""
     stopped = threading.Event()
     started = time.monotonic()
     def progress():
@@ -750,11 +784,15 @@ class Loop:
         self.run_budget = None
         self.jvm_commit = None
 
-    def evaluate(self, session, expression, timeout=None, margin=3):
-        budget = None
-        if timeout is None:
-            budget = self.run_budget or run_budget(self.load()['per_core'])
+    # INTENT: LOOP-RUN-BUDGET-016
+    def evaluate(self, session, expression, timeout=None, margin=3, budget=None):
+        """One nREPL round trip. `budget` is a focused check's run budget: only a check
+        waits that long, and only a check reports progress while it waits. Every other
+        caller gets DEFAULT_EVAL_TIMEOUT_S (or its own explicit timeout) and is silent."""
+        if budget is not None:
             timeout = budget['seconds']
+        elif timeout is None:
+            timeout = DEFAULT_EVAL_TIMEOUT_S
         # Nonce-bound receipt (curtaincall variant): a unique, atomically published
         # file survives test stdout capture, and the request-id binds the result to
         # this exact request, never a prior green.
@@ -893,7 +931,7 @@ class Loop:
         generation = str(uuid.uuid4())
         env = dict(os.environ, DEV_LOOP_GENERATION=generation)
         env.update(self.env)
-        jvm_commit = runner_version(self.root)['commit']
+        jvm_commit = runner_version()['commit']
         command = runner_command(self.root, self.aliases, generation)
         with (self.run / 'boot.log').open('w') as log:
             process = subprocess.Popen(command, cwd=self.root, env=env, stdout=log,
@@ -963,7 +1001,10 @@ class Loop:
         if fail_on_leak:
             # INTENT: LOOP-LEAK-VERDICT-010
             options = options[:-1] + ' :fail-on-leak true}'
-        receipt = self.evaluate(session, '(' + RUNNER_NS + '/check! ' + json.dumps(names) + ' ' + options + ')')
+        # INTENT: LOOP-RUN-BUDGET-016
+        budget = self.run_budget or run_budget(self.load()['per_core'])
+        receipt = self.evaluate(session, '(' + RUNNER_NS + '/check! ' + json.dumps(names) + ' ' + options + ')',
+                                budget=budget)
         after = fingerprint(self.root)
         # A focus refusal (a named test var does not exist, or no ^:perf var) comes after
         # a complete reload and runs nothing, so it leaves a clean image: terminal, untainted.
@@ -1160,7 +1201,7 @@ def main(argv=None):
                 receipt['run_budget']['per_core_end'] = end_load['per_core']
             receipt.update(load_1m=load['load_1m'], cpus=load['cpus'], per_core=load['per_core'],
                            load_1m_end=end_load['load_1m'])
-        receipt['runner'] = runner_version(root, loop.jvm_commit)
+        receipt['runner'] = runner_version(loop.jvm_commit)
         receipt.update(schema='dev-loop.v1', root=str(root), wall_s=round(time.monotonic() - start, 4),
                        queue_s=round(queue_s, 4))
         receipt_path = loop.run / ('result-' + str(uuid.uuid4()) + '.json')
@@ -1183,5 +1224,5 @@ if __name__ == '__main__':
         sys.exit(main())
     except Exception as exc:
         print(json.dumps({'schema': 'dev-loop.v1', 'status': 'unknown', 'error': str(exc),
-                          'runner': runner_version(Path.cwd())}))
+                          'runner': runner_version()}))
         sys.exit(2)
