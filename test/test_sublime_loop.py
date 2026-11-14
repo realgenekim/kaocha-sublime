@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -441,11 +442,11 @@ class TestFocusBlockTest(unittest.TestCase):
             for f in (fake, bin_dir / 'test-focus'):
                 f.chmod(0o755)
             focus = str(bin_dir / 'test-focus')
-            alone = subprocess.run([focus, 'a.core-test/adds'], capture_output=True, text=True, timeout=30)
+            alone = subprocess.run([focus, '--root', '.', 'a.core-test/adds'], capture_output=True, text=True, timeout=30)
             self.assertEqual(1, alone.returncode)
             self.assertEqual('{"status": "fail"}\n', alone.stdout, 'stdout carries exactly one receipt')
             self.assertEqual('FAIL a.core-test/adds\n', alone.stderr)
-            merged = subprocess.run(['bash', '-c', '"$0" a.core-test/adds 2>&1', focus],
+            merged = subprocess.run(['bash', '-c', '"$0" --root . a.core-test/adds 2>&1', focus],
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual('{"status": "fail"}\nFAIL a.core-test/adds\n', merged.stdout,
                              'the block is the last thing on screen, after the long JSON line')
@@ -580,6 +581,7 @@ class UnverifiedSessionTest(Workspace):
     def setUp(self):
         super().setUp()
         self.write_session(dict(record(self.root, 4242), aliases=':test'))
+        self.real_popen = cli.subprocess.Popen
         self.patches = [
             mock.patch.object(cli, 'classify', lambda session, root: {'state': 'live', 'reason': 'owned-and-listening', 'owned': True}),
             mock.patch.object(cli, 'load_per_core', lambda: LOADED),
@@ -599,6 +601,8 @@ class UnverifiedSessionTest(Workspace):
         raise cli.NoReceipt('nREPL returned no terminal receipt: clj-nrepl-eval timed out after 8s')
 
     def no_new_jvm(self, *args, **kwargs):
+        if args[0][0] == 'git':
+            return self.real_popen(*args, **kwargs)
         raise AssertionError('a second JVM must never start for an unverified root')
 
     # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
@@ -646,7 +650,7 @@ class TestFocusStatusRoutingTest(unittest.TestCase):
     def run_focus(self, status_json):
         with tempfile.TemporaryDirectory() as tmp:
             focus, log = fake_focus(tmp, status_json)
-            done = subprocess.run([focus, 'a.core-test'], capture_output=True, text=True, timeout=30)
+            done = subprocess.run([focus, '--root', '.', 'a.core-test'], capture_output=True, text=True, timeout=30)
             return done, log.read_text().split()
 
     # INTENT-TEST: LOOP-PROBE-UNVERIFIED-003
@@ -1105,34 +1109,287 @@ class TestFocusOptionsTest(unittest.TestCase):
     def run_focus(self, *args):
         with tempfile.TemporaryDirectory() as tmp:
             focus, log = fake_focus(tmp, '{"status": "ready"}')
-            done = subprocess.run([focus, *args], capture_output=True, text=True, timeout=30)
+            done = subprocess.run([focus, '--root', '.', *args], capture_output=True, text=True, timeout=30)
             return done, log.read_text().splitlines()
 
     # INTENT-TEST: LOOP-REPEAT-007
     def test_repeat_and_slowest_reach_only_the_check(self):
         done, calls = self.run_focus('--repeat', '3', 'a.core-test', '--slowest', '9')
         self.assertEqual(0, done.returncode, done.stderr)
-        self.assertEqual(['status', '--repeat 3 --slowest 9 check a.core-test'], calls)
+        self.assertEqual(['--root . status', '--root . --repeat 3 --slowest 9 check a.core-test'], calls)
 
     # INTENT-TEST: LOOP-LEAK-VERDICT-010
     def test_fail_on_leak_reaches_only_the_check(self):
         done, calls = self.run_focus('--fail-on-leak', 'a.core-test')
         self.assertEqual(0, done.returncode, done.stderr)
-        self.assertEqual(['status', '--fail-on-leak check a.core-test'], calls)
+        self.assertEqual(['--root . status', '--root . --fail-on-leak check a.core-test'], calls)
 
     # INTENT-TEST: LOOP-STALE-REPAIR-012
     def test_repair_stale_reaches_only_the_check(self):
         done, calls = self.run_focus('--repair-stale', 'a.core-test')
         self.assertEqual(0, done.returncode, done.stderr)
-        self.assertEqual(['status', '--repair-stale check a.core-test'], calls)
+        self.assertEqual(['--root . status', '--root . --repair-stale check a.core-test'], calls)
 
     # INTENT-TEST: LOOP-PERF-MODE-008
     def test_perf_prints_the_load_first_and_needs_no_namespace(self):
         done, calls = self.run_focus('--perf')
         self.assertEqual(0, done.returncode, done.stderr)
-        self.assertEqual(['status', '--perf check'], calls)
+        self.assertEqual(['--root . status', '--root . --perf check'], calls)
         first = done.stderr.splitlines()[0]
         self.assertRegex(first, r'^test-focus: --perf; load averages [0-9.]+[ ,]+[0-9.]+[ ,]+[0-9.]+ on \d+ cpus, before the run$')
         refused = subprocess.run([str(SCRIPT.parent / 'test-focus')], capture_output=True, text=True, timeout=30)
         self.assertEqual(2, refused.returncode)
-        self.assertIn('(or use --perf)', refused.stderr)
+        self.assertIn('--root', refused.stderr)
+
+
+class ApprovedLoopContractsTest(Workspace):
+    def guarded_scripts(self):
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir(exist_ok=True)
+        for name in ('test-focus', 'warm-jvm', 'sublime-loop'):
+            path = bin_dir / name
+            path.write_text((SCRIPT.parent / name).read_text())
+            path.chmod(0o755)
+        # Any attempted client/JVM call fails loudly; real scripts only see a temp root.
+        for name in ('clojure', 'clj-nrepl-eval', 'java'):
+            path = bin_dir / name
+            path.write_text('#!/bin/sh\necho FORBIDDEN-JVM >&2\nexit 99\n')
+            path.chmod(0o755)
+        return bin_dir
+
+    # INTENT-TEST: LOOP-USAGE-015
+    def test_help_never_starts_a_jvm(self):
+        bin_dir = self.guarded_scripts()
+        # Wrappers must not even call status: substitute a loud engine.
+        engine = bin_dir / 'sublime-loop'
+        real_engine = engine.read_text()
+        for name in ('sublime-loop', 'test-focus', 'warm-jvm'):
+            engine.write_text(real_engine if name == 'sublime-loop' else
+                              '#!/bin/sh\necho FORBIDDEN-ENGINE >&2\nexit 99\n')
+            for args in (['--help'], ['-h'], ['--root', str(self.root), 'check', '--help'],
+                         ['--root', '--help'], ['--bad-flag', '-h']):
+                with self.subTest(script=name, args=args):
+                    done = subprocess.run([str(bin_dir / name), *args], cwd=self.root,
+                                          env=dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH']),
+                                          capture_output=True, text=True, timeout=10)
+                    self.assertEqual(0, done.returncode, done.stderr)
+                    self.assertIn('usage', done.stdout.lower())
+                    self.assertNotIn('FORBIDDEN', done.stderr)
+        self.assertEqual([], list(self.run_dir.iterdir()))
+
+    # INTENT-TEST: LOOP-USAGE-015
+    def test_missing_root_is_refused_without_a_jvm(self):
+        bin_dir = self.guarded_scripts()
+        (bin_dir / 'sublime-loop').write_text('#!/bin/sh\necho FORBIDDEN-ENGINE >&2\nexit 99\n')
+        for name in ('test-focus', 'warm-jvm'):
+            with self.subTest(script=name):
+                done = subprocess.run([str(bin_dir / name), 'a.core-test'], cwd=self.root,
+                                      capture_output=True, text=True, timeout=10)
+                self.assertEqual(2, done.returncode, done.stderr)
+                self.assertIn('--root', done.stderr)
+                self.assertIn(str(self.root), done.stderr)
+                self.assertNotIn('FORBIDDEN', done.stderr)
+
+    # INTENT-TEST: LOOP-RUN-BUDGET-016
+    def test_run_budget_scales_with_load_and_is_capped(self):
+        for load, seconds in ((0, 120), (2, 360), (100, 600), (None, 240)):
+            self.assertEqual(seconds, cli.run_budget(load)['seconds'])
+            self.assertEqual('scaled', cli.run_budget(load)['source'])
+
+    def timeout_check(self, timeout=None):
+        session = dict(record(self.root, 123), aliases=':test', jvm_commit='old-jvm',
+                       environment=cli.environment_fingerprint(self.root))
+        calls = []
+        real_run = cli.subprocess.run
+        loads = iter([{'load_1m': 16, 'cpus': 8, 'per_core': 2},
+                      {'load_1m': 24, 'cpus': 8, 'per_core': 3}])
+        def no_answer(command, **kwargs):
+            if command[0] == 'git':
+                return real_run(command, **kwargs)
+            calls.append((command, kwargs))
+            raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+        out = io.StringIO()
+        with mock.patch.object(cli.Loop, 'load_session', return_value=(session, None)), \
+                mock.patch.object(cli, 'load_per_core', side_effect=lambda: next(loads)), \
+                mock.patch.object(cli.subprocess, 'run', side_effect=no_answer), \
+                redirect_stdout(out), redirect_stderr(io.StringIO()):
+            args = ['--root', str(self.root), 'check', 'a.core-test']
+            if timeout is not None:
+                args += ['--timeout', str(timeout)]
+            code = cli.main(args)
+        return json.loads(out.getvalue()), code, calls
+
+    # INTENT-TEST: LOOP-RUN-BUDGET-016
+    def test_explicit_timeout_wins_and_is_reported(self):
+        receipt, code, calls = self.timeout_check(17)
+        self.assertEqual(2, code)
+        self.assertEqual({'seconds': 17, 'source': 'explicit', 'per_core_start': 2,
+                          'per_core_end': 3}, receipt['run_budget'])
+        self.assertEqual(20, calls[0][1]['timeout'])
+        self.assertIn('17000', calls[0][0])
+        with tempfile.TemporaryDirectory() as tmp:
+            focus, log = fake_focus(tmp, '{"status": "ready"}')
+            done = subprocess.run([focus, '--root', '.', '--timeout', '17', 'a.core-test'],
+                                  capture_output=True, text=True)
+            self.assertEqual(0, done.returncode, done.stderr)
+            self.assertEqual(['--root . status', '--root . --timeout 17 check a.core-test'],
+                             log.read_text().splitlines())
+        bin_dir = self.guarded_scripts()
+        (bin_dir / 'sublime-loop').write_text('#!/bin/sh\necho FORBIDDEN-ENGINE >&2\nexit 99\n')
+        for value in ('0', '-1', 'oops', 'nan', 'inf'):
+            for script in (bin_dir / 'test-focus', SCRIPT):
+                done = subprocess.run([str(script), '--root', str(self.root), '--timeout', value,
+                                       'check', 'a.core-test'], capture_output=True, text=True)
+                self.assertEqual(2, done.returncode)
+                self.assertIn('--timeout', done.stderr)
+                self.assertNotIn('FORBIDDEN', done.stderr)
+
+    # INTENT-TEST: LOOP-RUN-BUDGET-016
+    def test_a_run_timeout_receipt_names_its_budget_and_load(self):
+        receipt, code, calls = self.timeout_check()
+        self.assertEqual(2, code)
+        self.assertEqual('unknown', receipt['status'])
+        self.assertEqual({'seconds': 360, 'source': 'scaled', 'per_core_start': 2,
+                          'per_core_end': 3}, receipt['run_budget'])
+        self.assertEqual(363, calls[0][1]['timeout'])
+
+    # INTENT-TEST: LOOP-RUNNER-VERSION-017
+    def test_receipt_carries_runner_commits(self):
+        receipt, code = self.invoke('status')
+        commit = subprocess.check_output(['git', '-C', str(cli.LIBRARY), 'rev-parse', '--short', 'HEAD'], text=True).strip()
+        self.assertEqual(commit, receipt['runner']['commit'])
+        self.assertTrue(receipt['runner']['dirty'])
+        self.assertIsNone(receipt['runner']['jvm_commit'])
+        self.assertEqual(2, code)
+        # Receipt assembly reads the persisted JVM version, not the script version.
+        session = dict(record(self.root, 123), jvm_commit='older-commit')
+        with mock.patch.object(cli.Loop, 'load_session', return_value=(session, None)):
+            receipt, code = self.invoke('status')
+        self.assertEqual('older-commit', receipt['runner']['jvm_commit'])
+        with mock.patch.object(cli, 'LIBRARY', self.root):
+            receipt, _ = self.invoke('status')
+        self.assertIsNone(receipt['runner']['commit'])
+        self.assertIsNone(receipt['runner']['dirty'])
+
+        # Startup snapshots the script commit into the durable ownership record.
+        loop = cli.Loop(self.root, ':test', {})
+        loop.load_session = lambda: (None, None)
+        def spawn(command, **kwargs):
+            self.write_session(dict(record(self.root, 123, generation=kwargs['env']['DEV_LOOP_GENERATION'])))
+            return mock.Mock()
+        with mock.patch.object(cli.subprocess, 'Popen', side_effect=spawn), \
+                mock.patch.object(cli.shutil, 'which', return_value='/fake/client'), \
+                mock.patch.object(cli, 'runner_version', return_value={'commit': 'boot-commit'}), \
+                mock.patch.object(loop, 'attest'):
+            loop.boot()
+        self.assertEqual('boot-commit', json.loads(loop.session_path.read_text())['jvm_commit'])
+        # Clean and dirty git states are observed from the runner checkout.
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        subprocess.run(['git', '-C', str(self.root), 'add', 'deps.edn'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=Test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'fixture'], check=True)
+        # Ignore test harness state when checking a clean checkout.
+        (self.root / '.git/info/exclude').write_text('.dev-loop/\n')
+        with mock.patch.object(cli, 'LIBRARY', self.root):
+            self.assertFalse(cli.runner_version(self.root)['dirty'])
+            (self.root / 'deps.edn').write_text('{:paths ["src"]}')
+            self.assertTrue(cli.runner_version(self.root)['dirty'])
+
+    # INTENT-TEST: LOOP-RUNNER-VERSION-017
+    def test_a_jvm_on_older_code_warns_and_keeps_the_verdict(self):
+        runner = cli.runner_version(self.root, 'older-commit')
+        self.assertTrue(runner['drift'])
+        with tempfile.TemporaryDirectory() as tmp:
+            focus, _ = fake_focus(tmp, '{"status": "ready"}')
+            engine = Path(focus).parent / 'sublime-loop'
+            engine.write_text(engine.read_text().replace('{"status": "pass"}', json.dumps({
+                'status': 'pass', 'counts': {'tests': 1}, 'runner': runner})))
+            done = subprocess.run([focus, '--root', '.', 'a.core-test'], capture_output=True, text=True)
+            self.assertEqual(0, done.returncode)
+            self.assertEqual(1, len(done.stderr.splitlines()))
+            self.assertIn(runner['commit'], done.stderr)
+            self.assertIn('older-commit', done.stderr)
+            self.assertIn('sublime-loop', done.stderr)
+            self.assertIn('down', done.stderr)
+            self.assertIn('up', done.stderr)
+            self.assertEqual({'tests': 1}, json.loads(done.stdout)['counts'])
+
+    # INTENT-TEST: LOOP-RUNNER-VERSION-017
+    def test_unknown_jvm_commit_is_not_drift(self):
+        runner = cli.runner_version(self.root)
+        self.assertFalse(runner['drift'])
+        self.assertIsNone(runner['jvm_commit'])
+        self.assertNotIn('pin', runner)
+        self.assertFalse(cli.runner_version(self.root, runner['commit'])['drift'])
+
+    # INTENT-TEST: LOOP-USAGE-015
+    def test_bare_test_focus_uses_a_recorded_warm_jvm(self):
+        bin_dir = self.guarded_scripts()
+        log = self.root / 'calls'
+        engine = bin_dir / 'sublime-loop'
+        engine.write_text('#!/bin/sh\necho "$*" >> "' + str(log) +
+                          '"\ncase "$*" in *status) echo \'{"status": "ready"}\';; '
+                          '*check*) echo \'{"status": "pass"}\';; *) exit 99;; esac\n')
+        self.write_session(record(self.root, 123))
+        done = subprocess.run([str(bin_dir / 'test-focus'), 'a.core-test'], cwd=self.root,
+                              capture_output=True, text=True)
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertEqual(['--root ' + str(self.root) + ' status',
+                          '--root ' + str(self.root) + ' check a.core-test'], log.read_text().splitlines())
+        self.assertNotIn('COLD START', done.stderr)
+
+    # INTENT-TEST: LOOP-RUN-BUDGET-016
+    def test_a_long_check_prints_progress(self):
+        loop = cli.Loop(self.root, ':test', {})
+        loop.run_budget = {'seconds': 600, 'source': 'explicit'}
+        reported = threading.Event()
+        class ProgressOutput(io.StringIO):
+            def write(self, value):
+                result = super().write(value)
+                if self.getvalue().count('\n') >= 3:
+                    reported.set()
+                return result
+        err = ProgressOutput()
+        def slow_client(*args, **kwargs):
+            reported.wait(2)
+            return mock.Mock(stdout='', stderr='')
+        with mock.patch.object(cli, 'RUN_PROGRESS_AFTER_S', 0.02, create=True), \
+                mock.patch.object(cli, 'RUN_PROGRESS_INTERVAL_S', 0.02, create=True), \
+                mock.patch.object(cli.subprocess, 'run', side_effect=slow_client), redirect_stderr(err):
+            with self.assertRaises(cli.NoReceipt):
+                loop.evaluate({'port': 123}, '(check)')
+        lines = err.getvalue().splitlines()
+        self.assertGreaterEqual(len(lines), 3)
+        for line in lines:
+            self.assertIn('elapsed', line)
+            self.assertIn('600', line)
+            self.assertIn('budget', line)
+
+    def test_focus_streams_progress_before_the_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            focus, _ = fake_focus(tmp, '{"status": "ready"}')
+            engine = Path(focus).parent / 'sublime-loop'
+            ack = Path(tmp) / 'progress-seen'
+            engine.write_text('#!/usr/bin/env python3\nimport sys,time\nfrom pathlib import Path\n'
+                              'if sys.argv[-1] == "status": print(\'{"status": "ready"}\')\n'
+                              'else:\n'
+                              ' print("test-focus: check still running; elapsed 180s; budget 600s", file=sys.stderr, flush=True)\n'
+                              ' for _ in range(200):\n'
+                              '  if Path(' + repr(str(ack)) + ').exists(): break\n'
+                              '  time.sleep(.01)\n'
+                              ' print(\'{"status": "pass"}\')\n')
+            process = subprocess.Popen([focus, '--root', '.', 'a.core-test'],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                line = process.stderr.readline()
+                self.assertIn('elapsed 180s; budget 600s', line)
+                self.assertIsNone(process.poll(), 'progress arrives while the check still waits')
+                ack.touch()
+                out, err = process.communicate(timeout=5)
+                self.assertEqual(0, process.returncode, err)
+                self.assertEqual('pass', json.loads(out)['status'])
+                self.assertNotIn('check still running', err, 'progress is emitted once')
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()

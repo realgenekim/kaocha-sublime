@@ -16,6 +16,7 @@ import datetime
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -24,6 +25,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 import uuid
 
 LIBRARY = Path(__file__).resolve().parent.parent
@@ -626,6 +628,66 @@ def probe_budget(per_core):
             'backoff_s': [min(4, 2 ** n) for n in range(attempts - 1)]}
 
 
+# INTENT: LOOP-RUN-BUDGET-016
+def run_budget(per_core, timeout=None):
+    busy = 1.0 if per_core is None else max(0.0, per_core)
+    return {'seconds': timeout if timeout is not None else min(600, 120 * min(PROBE_SCALE_MAX, 1 + busy)),
+            'source': 'explicit' if timeout is not None else 'scaled',
+            'per_core_start': per_core}
+
+
+def positive_timeout(value):
+    try:
+        seconds = float(value)
+        if math.isfinite(seconds) and seconds > 0:
+            return seconds
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError('--timeout must be a positive number')
+
+
+# INTENT: LOOP-RUNNER-VERSION-017
+def runner_version(root, jvm_commit=None):
+    def git(*args):
+        try:
+            result = subprocess.run(['git', '-C', str(LIBRARY), *args],
+                                    capture_output=True, text=True, timeout=10)
+            return result.stdout.strip() if result.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+    commit = git('rev-parse', '--short', 'HEAD')
+    status = git('status', '--porcelain')
+    return {'commit': commit, 'dirty': None if status is None else bool(status),
+            'jvm_commit': jvm_commit,
+            'drift': bool(commit and jvm_commit and commit != jvm_commit)}
+
+
+# INTENT: LOOP-RUN-BUDGET-016
+RUN_PROGRESS_AFTER_S = 120
+RUN_PROGRESS_INTERVAL_S = 60
+
+
+def run_with_progress(command, budget, **kwargs):
+    """Keep the transport wait bounded while reporting long focused checks live."""
+    stopped = threading.Event()
+    started = time.monotonic()
+    def progress():
+        delay = RUN_PROGRESS_AFTER_S
+        while not stopped.wait(delay):
+            elapsed = time.monotonic() - started
+            print('test-focus: check still running; elapsed %.0fs; budget %ss' %
+                  (elapsed, budget['seconds']), file=sys.stderr, flush=True)
+            delay = RUN_PROGRESS_INTERVAL_S
+    reporter = threading.Thread(target=progress, daemon=True)
+    reporter.start()
+    try:
+        return subprocess.run(command, **kwargs)
+    finally:
+        stopped.set()
+        reporter.join()
+
+
+
 class NoReceipt(RuntimeError):
     """The nREPL request produced no terminal receipt (timeout, refused, client error)."""
 
@@ -685,8 +747,14 @@ class Loop:
         self.run = root / '.dev-loop'
         self.session_path = self.run / 'session.json'
         self.taint = self.run / 'tainted'
+        self.run_budget = None
+        self.jvm_commit = None
 
-    def evaluate(self, session, expression, timeout=120, margin=3):
+    def evaluate(self, session, expression, timeout=None, margin=3):
+        budget = None
+        if timeout is None:
+            budget = self.run_budget or run_budget(self.load()['per_core'])
+            timeout = budget['seconds']
         # Nonce-bound receipt (curtaincall variant): a unique, atomically published
         # file survives test stdout capture, and the request-id binds the result to
         # this exact request, never a prior green.
@@ -703,15 +771,18 @@ class Loop:
                 '[java.nio.file.StandardCopyOption/ATOMIC_MOVE])) '
                 '(println "DEV_LOOP_RESULT_SAVED"))')
         try:
-            result = subprocess.run(['clj-nrepl-eval', '--port', str(session['port']),
-                                     '--timeout', str(timeout * 1000), code], cwd=self.root,
+            run = (lambda command, **kwargs: run_with_progress(command, budget, **kwargs)) if budget else subprocess.run
+            result = run(['clj-nrepl-eval', '--port', str(session['port']),
+                                     '--timeout', str(math.ceil(timeout * 1000)), code], cwd=self.root,
                                     text=True, capture_output=True, timeout=timeout + margin)
             detail = (result.stderr or result.stdout)[-1600:]
         except subprocess.TimeoutExpired:
             detail = 'clj-nrepl-eval timed out after ' + str(timeout + margin) + 's'
         if response_path.exists():
             return read_transport(response_path, request_id)
-        raise NoReceipt('nREPL returned no terminal receipt: ' + detail, response_path, request_id)
+        error = NoReceipt('nREPL returned no terminal receipt: ' + detail, response_path, request_id)
+        error.run_budget = budget
+        raise error
 
     def attest(self, session, spawned=False):
         """Ask the runner who it is. Under load a probe can time out while the runner is
@@ -776,6 +847,7 @@ class Loop:
         if not self.session_path.exists():
             return None, None
         session = json.loads(self.session_path.read_text())
+        self.jvm_commit = session.get('jvm_commit')
         verdict = classify(session, self.root)
         if verdict['state'] == 'stale':
             archive = archive_session(self.run, self.session_path, session.get('pid'))
@@ -821,6 +893,7 @@ class Loop:
         generation = str(uuid.uuid4())
         env = dict(os.environ, DEV_LOOP_GENERATION=generation)
         env.update(self.env)
+        jvm_commit = runner_version(self.root)['commit']
         command = runner_command(self.root, self.aliases, generation)
         with (self.run / 'boot.log').open('w') as log:
             process = subprocess.Popen(command, cwd=self.root, env=env, stdout=log,
@@ -835,6 +908,8 @@ class Loop:
                 # unanswered under load, the record still describes it for the next probe.
                 session['environment'] = environment_fingerprint(self.root, self.aliases)
                 session['aliases'] = self.aliases
+                session['jvm_commit'] = jvm_commit
+                self.jvm_commit = jvm_commit
                 tmp = self.run / 'session.json.tmp'
                 tmp.write_text(json.dumps(session))
                 tmp.replace(self.session_path)
@@ -852,11 +927,13 @@ class Loop:
     def command(self, command, names, options=None):
         if command == 'up':
             session, stale = self.boot()
+            self.jvm_commit = session.get('jvm_commit')
             receipt = dict(session, status='ready')
             if stale:
                 receipt.update(stale_record=stale['path'], stale_reason=stale['reason'])
             return receipt
         session, stale = self.load_session(attest=False) if command == 'down' else self.load_session()
+        self.jvm_commit = (session or {}).get('jvm_commit')
         if session is None:
             if stale and command in ('status', 'down'):
                 return {'status': 'stopped', 'stale_record': stale['path'],
@@ -912,7 +989,11 @@ class Loop:
         return receipt, before, after, terminal
 
     def check(self, session, names, repeat=1, perf=False, slowest=SLOWEST_DEFAULT, repair_stale=False,
-              fail_on_leak=False):
+              fail_on_leak=False, timeout=None):
+        if self.run_budget is None:
+            self.run_budget = run_budget(self.load()['per_core'], timeout)
+        elif timeout is not None:
+            self.run_budget = run_budget(self.run_budget['per_core_start'], timeout)
         if (not names and not perf) or any(not valid_target(n) for n in names):
             raise RuntimeError('name explicit test namespaces or test vars: sublime-loop check '
                                'project.core-test project.db-test/reads-rows')
@@ -991,6 +1072,8 @@ def parse(argv):
                              'when deps.edn defines it); the library alias is always appended')
     parser.add_argument('--env', action='append', default=[], metavar='KEY=VALUE',
                         help='extra runner env; {state_dir} expands to <root>/.dev-loop')
+    parser.add_argument('--timeout', type=positive_timeout, default=None, metavar='SECONDS',
+                        help='check: explicit run receipt wait budget')
     parser.add_argument('--repeat', default='1', metavar='N',
                         help='check: run the selection N times (1-%d) and tally each test' % REPEAT_MAX)
     parser.add_argument('--perf', action='store_true',
@@ -1006,6 +1089,10 @@ def parse(argv):
                              'fails (default: reported, verdict unchanged)')
     parser.add_argument('command', nargs='?', default='status')
     parser.add_argument('names', nargs='*')
+    # INTENT: LOOP-USAGE-015
+    if any(arg in ('--help', '-h') for arg in argv):
+        parser.print_help()
+        parser.exit(0)
     return parser.parse_args(argv)
 
 
@@ -1017,6 +1104,8 @@ def check_options(args):
             raise RuntimeError('--%s must be a whole number' % key)
         out[key] = int(text)
     out['perf'] = bool(args.perf)
+    if args.timeout is not None:
+        out['timeout'] = args.timeout
     if args.repair_stale:
         out['repair_stale'] = True
     if args.fail_on_leak:
@@ -1052,6 +1141,8 @@ def main(argv=None):
         queue_s = time.monotonic() - start
         names = [n for arg in args.names for n in arg.split(',') if n]
         load = loop.load() if args.command == 'check' else None
+        if load is not None:
+            loop.run_budget = run_budget(load['per_core'], args.timeout)
         try:
             receipt = loop.command(args.command, names, check_options(args))
         except Unverified as exc:
@@ -1060,10 +1151,16 @@ def main(argv=None):
                        'generation': exc.evidence.get('generation')}
         except Exception as exc:
             receipt = {'status': 'unknown', 'error': str(exc)}
+            if isinstance(exc, NoReceipt) and getattr(exc, 'run_budget', None) is not None:
+                receipt['run_budget'] = dict(exc.run_budget)
         if load is not None:
             # INTENT: LOOP-RECEIPT-LOAD-SLOWEST-006
+            end_load = loop.load()
+            if 'run_budget' in receipt:
+                receipt['run_budget']['per_core_end'] = end_load['per_core']
             receipt.update(load_1m=load['load_1m'], cpus=load['cpus'], per_core=load['per_core'],
-                           load_1m_end=loop.load()['load_1m'])
+                           load_1m_end=end_load['load_1m'])
+        receipt['runner'] = runner_version(root, loop.jvm_commit)
         receipt.update(schema='dev-loop.v1', root=str(root), wall_s=round(time.monotonic() - start, 4),
                        queue_s=round(queue_s, 4))
         receipt_path = loop.run / ('result-' + str(uuid.uuid4()) + '.json')
@@ -1085,5 +1182,6 @@ if __name__ == '__main__':
     try:
         sys.exit(main())
     except Exception as exc:
-        print(json.dumps({'schema': 'dev-loop.v1', 'status': 'unknown', 'error': str(exc)}))
+        print(json.dumps({'schema': 'dev-loop.v1', 'status': 'unknown', 'error': str(exc),
+                          'runner': runner_version(Path.cwd())}))
         sys.exit(2)

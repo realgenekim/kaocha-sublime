@@ -3,7 +3,7 @@
 # The first action of any Clojure code session, in the checkout you are editing: a worktree
 # needs its own JVM, because a JVM started in another checkout runs that checkout's code.
 #
-#   warm-jvm                                        # root = cwd; aliases :test (+ :sublime if defined)
+#   warm-jvm --root .                               # aliases :test (+ :sublime if defined)
 #   warm-jvm --root server2 --aliases :run-tests:dev:test
 #
 # Thin wrapper over sublime-loop up (same flags). The library itself (this checkout) is
@@ -11,4 +11,16 @@
 # session is reused. Run it in the background; the JSON receipt says ready, with the
 # port and generation. Docs: docs/SETUP.md in this library.
 set -euo pipefail
+# INTENT: LOOP-USAGE-015
+for arg in "$@"; do
+  case "$arg" in --help|-h)
+    echo "Usage: warm-jvm --root DIR [--aliases :a:b] [--env KEY=VALUE]"
+    sed -n '2,/^set /{ /^#/s/^# \{0,1\}//p; }' "$0"
+    exit 0 ;;
+  esac
+done
+has_root=0
+for arg in "$@"; do [ "$arg" != --root ] || has_root=1; done
+[ "$has_root" -eq 1 ] || {
+  echo "warm-jvm: --root DIR is required (current directory: $PWD)" >&2; exit 2; }
 exec "$(cd "$(dirname "$0")" && pwd)/sublime-loop" "$@" up

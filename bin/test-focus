@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # test-focus -- run named test namespaces or test vars in the warm JVM for this project root.
 #
-#   test-focus my.app.core-test my.app.db-test
-#   test-focus my.app.core-test/adds-two my.app.db-test     # one var, plus a whole namespace
+#   test-focus --root . my.app.core-test my.app.db-test
+#   test-focus --root . my.app.core-test/adds-two my.app.db-test     # one var, plus a whole namespace
 #   test-focus --root server2 --aliases :run-tests:dev:test server2.handlers.discover-test
-#   test-focus --repeat 10 my.app.core-test/flaky-one   # rerun 10x warm; tally + verdict
-#   test-focus --perf                                    # every ^:perf test, load printed first
-#   test-focus --perf my.app.render-test --slowest 10
+#   test-focus --root . --repeat 10 my.app.core-test/flaky-one   # rerun 10x warm; tally + verdict
+#   test-focus --root . --perf                                    # every ^:perf test, load printed first
+#   test-focus --root . --perf my.app.render-test --slowest 10
 #
 # Thin wrapper over sublime-loop check. When no warm JVM is up, it is tainted, or its
 # dependencies/runner/aliases changed, it says so LOUDLY on stderr ("COLD START"), starts
@@ -35,21 +35,41 @@
 # Exit code is the check's: 0 pass, 1 fail/stale/tainted, 2 unknown.
 # Pass the same --root/--aliases you gave warm-jvm. Docs: docs/SETUP.md in this library.
 set -euo pipefail
+# INTENT: LOOP-USAGE-015
+for arg in "$@"; do
+  case "$arg" in --help|-h)
+    echo "Usage: test-focus [--root DIR] [--aliases :a:b] [--timeout SECONDS] [flags] NS|NS/VAR..."
+    sed -n '2,/^set /{ /^#/s/^# \{0,1\}//p; }' "$0"
+    exit 0 ;;
+  esac
+done
 LOOP="$(cd "$(dirname "$0")" && pwd)/sublime-loop"
-flags=(); checkflags=(); names=(); perf=0
+flags=(); checkflags=(); names=(); perf=0; has_root=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --root|--aliases|--env)
       [ $# -ge 2 ] || { echo "test-focus: $1 needs a value" >&2; exit 2; }
+      [ "$1" != --root ] || has_root=1
       flags+=("$1" "$2"); shift 2 ;;
-    --repeat|--slowest)
+    --repeat|--slowest|--timeout)
       [ $# -ge 2 ] || { echo "test-focus: $1 needs a value" >&2; exit 2; }
+      # INTENT: LOOP-RUN-BUDGET-016
+      if [ "$1" = --timeout ]; then
+        python3 -c 'import math,sys; v=float(sys.argv[1]); sys.exit(0 if math.isfinite(v) and v > 0 else 2)' "$2" 2>/dev/null || {
+          echo "test-focus: --timeout must be a positive number" >&2; exit 2; }
+      fi
       checkflags+=("$1" "$2"); shift 2 ;;
     --perf) checkflags+=("$1"); perf=1; shift ;;
     --repair-stale|--fail-on-leak) checkflags+=("$1"); shift ;;
     *) names+=("$1"); shift ;;
   esac
 done
+if [ "$has_root" -eq 0 ]; then
+  # The same durable record read by sublime-loop status; never infer another root.
+  [ -f "$PWD/.dev-loop/session.json" ] || {
+    echo "test-focus: --root DIR is required without a recorded warm JVM (current directory: $PWD)" >&2; exit 2; }
+  flags+=(--root "$PWD")
+fi
 [ ${#names[@]} -gt 0 ] || [ "$perf" -eq 1 ] || {
   echo "test-focus: name at least one test namespace or ns/test-var (or use --perf)" >&2; exit 2; }
 # INTENT: LOOP-PERF-MODE-008
@@ -91,17 +111,41 @@ case "$status" in
   *'"status": "ready"'*) ;;
   *'"status": "tainted"'*) cold "warm JVM tainted"; down; up ;;
   *'"status": "unverified"'*) unverified "$status" ;;
-  *'"status": "stopped"'*|*'no owned test process'*) cold "no warm JVM for this root"; up ;;
+  *'"status": "stopped"'*|*'no owned test process'*)
+    [ "$has_root" -eq 1 ] || {
+      echo "test-focus: --root DIR is required without a warm JVM (current directory: $PWD)" >&2; exit 2; }
+    cold "no warm JVM for this root"; up ;;
   *) echo "test-focus: the loop could not report on the warm JVM (no JVM started); see the receipt" >&2
      printf '%s\n' "$status"; exit 2 ;;
 esac
-out="$("$LOOP" ${flags[@]+"${flags[@]}"} ${checkflags[@]+"${checkflags[@]}"} check ${names[@]+"${names[@]}"} 2>"$block")" && rc=0 || rc=$?
+check() {
+  : >"$block"
+  "$LOOP" ${flags[@]+"${flags[@]}"} ${checkflags[@]+"${checkflags[@]}"} check ${names[@]+"${names[@]}"} 2>&1 1>&3 |
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        'test-focus: check still running;'*) printf '%s\n' "$line" >&2 ;;
+        *) printf '%s\n' "$line" >>"$block" ;;
+      esac
+    done
+} 3>&1
+out="$(check)" && rc=0 || rc=$?
 case "$out" in
   *'runner or dependencies changed'*)
     cold "dependencies, runner or aliases changed"
     down; up
-    out="$("$LOOP" ${flags[@]+"${flags[@]}"} ${checkflags[@]+"${checkflags[@]}"} check ${names[@]+"${names[@]}"} 2>"$block")" && rc=0 || rc=$? ;;
+    out="$(check)" && rc=0 || rc=$? ;;
 esac
+# INTENT: LOOP-RUNNER-VERSION-017
+python3 -c '
+import json, sys
+try:
+    runner = json.loads(sys.argv[1]).get("runner") or {}
+except ValueError:
+    runner = {}
+if runner.get("drift"):
+    print("test-focus: warm JVM started at %s; scripts are at %s. Run sublime-loop down then up to restart on the current code." %
+          (runner["jvm_commit"], runner["commit"]), file=sys.stderr)
+' "$out"
 printf '%s\n' "$out"
 cat "$block" >&2
 exit "$rc"

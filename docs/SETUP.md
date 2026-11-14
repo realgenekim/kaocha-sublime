@@ -8,9 +8,14 @@ Three commands do the work, all in this library's `bin/`:
 
 | Command | What it does |
 |---|---|
-| `warm-jvm` | Starts (or confirms) the warm JVM for a project root. Same as `sublime-loop up`. |
+| `warm-jvm --root DIR` | Starts (or confirms) the warm JVM for a project root. Same as `sublime-loop up`. |
 | `test-focus NS...` | Runs the named test namespaces in that JVM. Starts or restarts the JVM if needed, with a loud `COLD START` line. |
 | `sublime-loop` | The engine: `up`, `status`, `check NS...`, `down`. |
+
+`warm-jvm` requires `--root DIR`. Bare `test-focus` uses the current directory only
+when `.dev-loop/session.json` records a warm JVM there; otherwise it refuses with exit 2
+and starts nothing. Give `--root DIR` explicitly to allow a cold start. All three
+commands accept `--help` or `-h` without contacting a JVM.
 
 ## 1. Prerequisites
 
@@ -476,7 +481,7 @@ most 3 attempts.
 
 ## 11. Worktrees
 
-Each worktree gets its own JVM. Run `warm-jvm` inside the worktree you are editing.
+Each worktree gets its own JVM. Run `warm-jvm --root .` inside the worktree you are editing.
 
 Why: the JVM reloads source from its own project root. A JVM started in another
 checkout runs that checkout's code, so its green says nothing about your edits. The
