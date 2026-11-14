@@ -1258,7 +1258,9 @@ class ApprovedLoopContractsTest(Workspace):
         receipt, code = self.invoke('status')
         commit = subprocess.check_output(['git', '-C', str(cli.LIBRARY), 'rev-parse', '--short', 'HEAD'], text=True).strip()
         self.assertEqual(commit, receipt['runner']['commit'])
-        self.assertTrue(receipt['runner']['dirty'])
+        # The checkout's real state: dirty on a working copy with edits, clean on a fresh clone.
+        porcelain = subprocess.check_output(['git', '-C', str(cli.LIBRARY), 'status', '--porcelain'], text=True)
+        self.assertEqual(bool(porcelain.strip()), receipt['runner']['dirty'])
         self.assertIsNone(receipt['runner']['jvm_commit'])
         self.assertEqual(2, code)
         # Receipt assembly reads the persisted JVM version, not the script version.
