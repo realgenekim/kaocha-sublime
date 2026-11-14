@@ -334,7 +334,7 @@
         (f ns-sym source))
       (finally (.delete source) (remove-ns ns-sym)))))
 
-;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest a-def-inside-a-function-body-survives-a-reload
   (with-source "(defn start! [] (def ^:private client :connected))\n(defonce state (atom 1))"
     (fn [ns-sym source]
@@ -354,7 +354,7 @@
             (is (some #(and (= 'client (:var %)) (= :still-in-file (:reason %))) (:kept r))))
           (is (= :connected @(ns-resolve ns-sym 'client))))))))
 
-;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest a-deleted-definition-is-still-unmapped
   (with-source "(defn gone [] :old)"
     (fn [ns-sym source]
@@ -363,7 +363,7 @@
         (is (= '[gone] (mapv :var (:unmapped (reload/unmap-stale! ns-sym before source)))))
         (is (nil? (ns-resolve ns-sym 'gone)))))))
 
-;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest a-mentioned-but-undefined-symbol-is-still-unmapped
   (with-source "(def gone 1)"
     (fn [ns-sym source]
@@ -371,7 +371,28 @@
         (spit source "(comment gone)\n'(gone)\n::keyword")
         (is (= '[gone] (mapv :var (:unmapped (reload/unmap-stale! ns-sym before source)))))))))
 
-;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
+(deftest a-definition-moved-into-a-comment-or-quoted-data-is-unmapped
+  ;; The stale-pass this rule exists to refuse: commenting a test out leaves the old
+  ;; test executable in the warm image, where a cold JVM has no such test at all.
+  (with-source "(clojure.test/deftest deleted-test (clojure.test/is true))
+(def gone 1)
+(defn also-gone [] :old)"
+    (fn [ns-sym source]
+      (let [before (reload/interned-meta ns-sym)]
+        (is (= '[also-gone deleted-test gone] (sort (keys (select-keys before '[deleted-test gone also-gone]))))
+            "all three were loaded")
+        (spit source (str "(comment (clojure.test/deftest deleted-test (clojure.test/is true)))\n"
+                          "'(def gone 1)\n"
+                          "(clojure.core/comment (defn also-gone [] :old))\n"
+                          "(def still-here 1)"))
+        (let [r (reload/unmap-stale! ns-sym before source)]
+          (is (= '[also-gone deleted-test gone] (sort (mapv :var (:unmapped r))))
+              "a comment form and quoted data define nothing, at any depth")
+          (is (empty? (:kept r)))
+          (is (every? #(nil? (ns-resolve ns-sym %)) '[deleted-test gone also-gone])))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest an-unreadable-file-unmaps-nothing
   (with-source "(def one 1) (def two 2)"
     (fn [ns-sym source]
@@ -381,10 +402,36 @@
         (let [r (binding [*err* err] (reload/unmap-stale! ns-sym before source))]
           (is (empty? (:unmapped r)))
           (is (every? #(ns-resolve ns-sym %) '[one two]))
-          (is (= 1 (count (str/split-lines (str err)))))
-          (is (str/includes? (str err) (str ns-sym))))))))
+          (is (= [:unreadable-file :unreadable-file] (mapv :reason (:kept r))))
+          (is (= [(str "reload: cannot read source forms for " ns-sym "; unmapping nothing")]
+                 (str/split-lines (str err)))
+              "one warning for the namespace, saying what it could not do"))))))
 
-;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
+(deftest a-file-that-fails-to-read-with-an-error-unmaps-nothing
+  ;; A form nested past the stack (measured: 100k nested lists) throws
+  ;; StackOverflowError, not an Exception, and an Error while reading is as little
+  ;; evidence of a deletion as a reader exception is. The Error is injected rather than
+  ;; provoked: really overflowing the stack of a warm JVM other repos share, on every
+  ;; suite run, costs more than this line of coverage is worth.
+  (with-source "(def one 1)"
+    (fn [ns-sym source]
+      (let [before (reload/interned-meta ns-sym)
+            err (java.io.StringWriter.)
+            reader io/reader]
+        (let [r (binding [*err* err]
+                  (with-redefs [io/reader (fn [& args]
+                                            (if (= (seq args) [source])
+                                              (throw (StackOverflowError.))
+                                              (apply reader args)))]
+                    (reload/unmap-stale! ns-sym before source)))]
+          (is (empty? (:unmapped r)))
+          (is (= [:unreadable-file] (mapv :reason (:kept r))))
+          (is (some? (ns-resolve ns-sym 'one)))
+          (is (= [(str "reload: cannot read source forms for " ns-sym "; unmapping nothing")]
+                 (str/split-lines (str err)))))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest source-definitions-are-read-once-and-only-for-candidates
   (with-source ""
     (fn [ns-sym source]
@@ -407,9 +454,11 @@
               r (binding [*err* err]
                   (reload/unmap-stale! ns-sym (reload/interned-meta ns-sym) source))]
           (is (empty? (:unmapped r)) "read-eval is disabled")
-          (is (= 1 (count (str/split-lines (str err))))))))))
+          (is (= [(str "reload: cannot read source forms for " ns-sym "; unmapping nothing")]
+                 (str/split-lines (str err)))
+              "the refused read is the one warning on stderr"))))))
 
-;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest macro-made-vars-survive-a-reload
   (with-source "(defrecord Foo [x])
 (deftype Bar [x])
@@ -425,6 +474,16 @@
         (load-file (.getPath source))
         (let [r (reload/unmap-stale! ns-sym before source)]
           (is (empty? (:unmapped r)))
+          ;; Why they survive, stated so this test can fail: a top-level defrecord,
+          ;; deftype, defprotocol or def-making macro is re-evaluated by the load, which
+          ;; gives every var it makes a fresh metadata map. None of them is a candidate,
+          ;; so the file's text (which names Foo and Bar, never ->Foo or map->Foo) is
+          ;; never asked about them. The candidate cases are the test below.
+          (doseq [sym names]
+            (is (not (identical? (get before sym) (meta (ns-resolve ns-sym sym))))
+                (str sym " was redefined by the load")))
+          (is (empty? (:kept r)))
+          (is (zero? (:dynamic r)))
           (doseq [[sym v] (map vector names vars)]
             (is (some? v) (str sym))
             (is (identical? v (ns-resolve ns-sym sym)) (str sym)))
@@ -434,7 +493,39 @@
           (is (= 1 @@(ns-resolve ns-sym 'state)))
           (is (= :project ((ns-resolve ns-sym 'project-made)))))))))
 
-;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
+(deftest a-macro-made-definition-the-reload-does-not-redefine-is-kept
+  ;; The field case, through a macro: the def is inside a body that ran once (so the var
+  ;; carries this file's :file) and the reload does not run it again, so nothing but the
+  ;; file's own text can say the var is still defined.
+  (with-source "(defmacro def-lazy [n] `(defn ~(symbol (str \"start-\" n)) [] (def ~n :lazy)))
+(def-lazy lazily)
+(defn init [] (defrecord Foo [x]) (deftype Bar [y]) (defprotocol Ping (ping [this])))"
+    (fn [ns-sym source]
+      ((ns-resolve ns-sym 'start-lazily))
+      ((ns-resolve ns-sym 'init))
+      (let [before (reload/interned-meta ns-sym)
+            candidate? (fn [sym] (identical? (get before sym) (meta (ns-resolve ns-sym sym))))]
+        (load-file (.getPath source))
+        (let [r (reload/unmap-stale! ns-sym before source)
+              kept (into {} (map (juxt :var :reason)) (:kept r))]
+          (is (empty? (:unmapped r)))
+          (is (candidate? 'lazily) "the macro's def ran once; the reload does not run it again")
+          (is (= :still-in-file (kept 'lazily))
+              "and the macro call in the file still names it")
+          (is (= :lazy @(ns-resolve ns-sym 'lazily)))
+          (is (candidate? 'Ping) "defprotocol inside a body the reload does not run")
+          (is (= :still-in-file (kept 'Ping)) "the file still has the defprotocol form")
+          (is (= 1 (:dynamic r)) "the protocol method var has no :file: kept, never unmapped")
+          (is (some? (ns-resolve ns-sym 'ping)))
+          (doseq [sym '[->Foo map->Foo ->Bar start-lazily]]
+            (is (not (candidate? sym))
+                (str sym " is redefined by the load, so the file's text is never consulted for it"))
+            (is (some? (ns-resolve ns-sym sym)) (str sym)))
+          (is (= {:x 7} (into {} ((ns-resolve ns-sym '->Foo) 7))))
+          (is (some? ((ns-resolve ns-sym '->Bar) 9))))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest an-interned-var-survives-a-reload
   (with-source "(defn start! [] (intern *ns* 'runtime-value :connected))"
     (fn [ns-sym source]
@@ -448,7 +539,7 @@
           (is (identical? v (ns-resolve ns-sym 'runtime-value)))
           (is (= :connected @v)))))))
 
-;; INTENT-TEST: LOOP-RELOAD-UNMAP-014
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest the-first-reload-after-start-unmaps-a-deleted-definition
   (with-source "(defn gone [] :old)"
     (fn [ns-sym source]

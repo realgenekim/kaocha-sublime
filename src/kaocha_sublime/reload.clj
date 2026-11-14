@@ -9,12 +9,16 @@
   the very object it was before the reload was not defined by this evaluation of the
   file. Those vars are unmapped only when the file no longer names a definition.
 
+  Only code the file would evaluate names a definition: a form inside `(comment ...)`
+  or inside quoted data defines nothing, so a definition moved into a comment is a
+  deletion, and the var goes.
+
   Never remove-ns: defonce state, protocol vars and every var the file still defines
   keep their identity (compiled callers hold Var objects)."
   (:require
    [clojure.java.io :as io]))
 
-;; INTENT: LOOP-RELOAD-UNMAP-014
+;; INTENT: LOOP-RELOAD-UNMAP-018
 (defn interned-meta
   "{sym metadata-map} for every var interned in the namespace named `ns-sym`, nil when
   the namespace does not exist. Reads the namespace's mappings directly (no ns-interns
@@ -42,8 +46,29 @@
              (or (= path rel)
                  (.endsWith (.replace path \\ \/) (str "/" rel)))))))
 
+(defn- definitions-in
+  "Adds to `acc` every name the forms in `node` define, at any depth (including inside a
+  function body). A `comment` form and quoted data are not descended into: they
+  evaluate to nothing, so a `def` inside one is not a definition."
+  [acc node]
+  (if-not (coll? node)
+    acc
+    (let [head (when (and (seq? node) (symbol? (first node))) (name (first node)))]
+      (if (or (= head "comment") (= head "quote"))
+        acc
+        (reduce definitions-in
+                (if head
+                  (into acc (comp (filter symbol?) (map #(with-meta % nil)))
+                        (cond
+                          (= head "declare") (rest node)
+                          (.startsWith head "def") [(second node)]))
+                  acc)
+                (seq node))))))
+
 (defn- file-definitions
-  "Names of defining forms at any depth; nil on read failure (never evidence to unmap)."
+  "Names of defining forms at any depth, skipping comments and quoted data; nil on read
+  failure (never evidence to unmap). A form nested past the reader's or this walk's
+  stack depth is a read failure too, which is why Throwable is caught."
   [ns source]
   (try
     (binding [*read-eval* false *ns* ns]
@@ -52,22 +77,13 @@
           (let [form (read {:read-cond :allow :eof ::eof} reader)]
             (if (= ::eof form)
               names
-              (recur
-                (reduce (fn [acc node]
-                          (if (and (seq? node) (symbol? (first node)))
-                            (let [head (name (first node))
-                                  defs (cond
-                                         (= head "declare") (rest node)
-                                         (.startsWith head "def") [(second node)])]
-                              (into acc (comp (filter symbol?) (map #(with-meta % nil))) defs))
-                            acc))
-                        names (tree-seq coll? seq form))))))))
-    (catch Exception _
+              (recur (definitions-in names form)))))))
+    (catch Throwable _
       (binding [*out* *err*]
         (println (str "reload: cannot read source forms for " (ns-name ns) "; unmapping nothing")))
       nil)))
 
-;; INTENT: LOOP-RELOAD-UNMAP-014
+;; INTENT: LOOP-RELOAD-UNMAP-018
 (defn unmap-stale!
   "After a successful reload of `ns-sym`, given `before` (its `interned-meta` taken just
   before the reload) and `source` (its file, or nil): every var still interned whose
@@ -102,7 +118,7 @@
      {:unmapped [] :kept [] :dynamic 0}
      (or before {}))))
 
-;; INTENT: LOOP-RELOAD-UNMAP-014
+;; INTENT: LOOP-RELOAD-UNMAP-018
 (defn reload!
   "(require ns-sym :reload), then unmap the vars the file used to define and no longer
   does (`unmap-stale!`). Throws what require throws; a failed reload unmaps nothing (a
