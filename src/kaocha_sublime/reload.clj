@@ -99,13 +99,15 @@
   `def` inside one is not a definition. A qualified head (`clojure.core/comment`, or
   through an alias in `aliases`) is a comment form at any depth, since no local can
   shadow a qualified symbol. A bare `comment` head is one only where `bare-comment?` is
-  true (the top level of a file that has not shadowed it): inside a body a `let` may
-  bind `comment` to a function whose arguments run, so the definitions are kept."
+  true (the top level of a file that has not shadowed it, and the forms of a top-level
+  `do`, which Clojure compiles as top-level forms and which binds nothing): inside any
+  other body a `let` may bind `comment` to a function whose arguments run, so the
+  definitions are kept."
   [{:keys [aliases bare-comment?] :as ctx} acc node]
   (if-not (coll? node)
     acc
     (let [head (when (and (seq? node) (symbol? (first node))) (first node))
-          ctx (assoc ctx :bare-comment? false)]
+          ctx (assoc ctx :bare-comment? (and bare-comment? (= 'do head)))]
       (if (and head (or (and (core-form? head "comment" aliases)
                              (or (namespace head) bare-comment?))
                         (core-form? head "quote" aliases)))

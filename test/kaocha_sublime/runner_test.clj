@@ -650,6 +650,16 @@
         (is (some #(= "commented-out" (:var %)) (:unmapped r))
             "and the receipt says the reload unmapped it")
         (is (nil? (ns-resolve ns-sym 'commented-out))))
+      ;; Review round 5 (codex): a bare comment inside a top-level do is still the comment
+      ;; form, so the test it wraps is gone in a cold JVM and must be gone warm too.
+      (spit f (str header "(deftest commented-out (is true))\n"))
+      (is (= 2 (get-in (check!) [:counts :tests])) "the test is back")
+      (spit f (str header "(do (comment (deftest commented-out (is true))))\n"))
+      (let [r (check!)]
+        (is (= "pass" (:status r)) (:error r))
+        (is (= 1 (get-in r [:counts :tests]))
+            "a test commented out inside a top-level do is not counted either")
+        (is (nil? (ns-resolve ns-sym 'commented-out))))
       (finally
         (.delete f)
         (remove-ns ns-sym)))))
