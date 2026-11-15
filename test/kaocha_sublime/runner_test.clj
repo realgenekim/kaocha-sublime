@@ -429,51 +429,22 @@
               "an alias the file gives clojure.core resolves to it"))))))
 
 ;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
-(deftest a-locally-shadowed-comment-runs-its-body-and-keeps-the-definition
-  ;; Review round 4 (codex): (let [comment identity] (comment (def client ...))) runs the
-  ;; def. Treating that bare comment as clojure.core's unmapped client after start! ran,
-  ;; and the next dependent reload failed with No such var.
-  (let [src "(defn start! [] (let [comment identity] (comment (def client :connected))))"]
-    (with-source src
-      (fn [ns-sym source]
-        ((ns-resolve ns-sym 'start!))
-        (is (= :connected @(ns-resolve ns-sym 'client)) "start! ran the def")
-        (let [before (reload/interned-meta ns-sym)]
-          (load-file (.getPath source))
-          (let [r (reload/unmap-stale! ns-sym before source)]
-            (is (empty? (:unmapped r)))
-            (is (some #(and (= 'client (:var %)) (= :still-in-file (:reason %))) (:kept r))))
-          (is (= :connected @(ns-resolve ns-sym 'client)) "client survives the reload"))))))
-
-;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
-(deftest a-comment-defined-inside-a-top-level-do-keeps-the-definitions-its-calls-make
-  ;; Review round 6 (codex): the file's own comment, defined and called inside one
-  ;; top-level do, is an ordinary function, so start! defines client when it runs.
-  (with-source "(do (defn comment [x] x) (comment (defn start! [] (def client :connected))))"
-    (fn [ns-sym source]
-      ((ns-resolve ns-sym 'start!))
-      (is (= :connected @(ns-resolve ns-sym 'client)) "start! ran the def")
-      (let [before (reload/interned-meta ns-sym)]
-        (load-file (.getPath source))
-        (is (empty? (:unmapped (reload/unmap-stale! ns-sym before source))))
-        (is (= :connected @(ns-resolve ns-sym 'client)) "client survives the reload")))))
-
-;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
-(deftest a-file-that-shadows-comment-keeps-the-definitions-inside-it
+(deftest a-redefined-comment-is-still-read-as-the-comment-form
+  ;; The documented limit (Gene, 2026-11-15, after review rounds 4-7 on shadowing): every
+  ;; call headed by comment is the comment form. A file that redefines comment loses the
+  ;; definitions its calls would make, loudly on the next reload that needs them; a
+  ;; commented-out definition is never kept, whatever else the file defines.
   (with-source "(defn start! [] (def client :connected))\n(def gone 1)"
     (fn [ns-sym source]
-      ((ns-resolve ns-sym 'start!))
       (let [before (reload/interned-meta ns-sym)]
-        ;; :refer-clojure :exclude [comment] plus the file's own comment function.
         (spit source (str "(ns " ns-sym " (:refer-clojure :exclude [comment]))\n"
-                          "(defn comment [& xs] xs)\n"
-                          "(comment (defn start! [] (def client :connected)))\n"
-                          "(clojure.core/comment (def gone 1))\n"))
+                          "(comment (defn comment [x] x))\n"
+                          "(do (defn comment [& xs] xs) (comment (defn start! [] (def client :connected))))\n"
+                          "(comment (def gone 1))\n"))
         (let [r (reload/unmap-stale! ns-sym before source)]
-          (is (= '[gone] (mapv :var (:unmapped r)))
-              "clojure.core/comment by its full name is still the comment form")
-          (is (= '[client start!] (sort (mapv :var (:kept r))))
-              "the bare comment is the file's own function, so its body defines"))))))
+          (is (= '[gone start!] (sort (mapv :var (:unmapped r))))
+              "definitions inside comment calls are not definitions, redefined comment or not")
+          (is (not-any? #(= 'start! (:var %)) (:kept r))))))))
 
 ;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest an-unreadable-file-unmaps-nothing

@@ -11,10 +11,11 @@
 
   Only code the file would evaluate names a definition: a form inside `(comment ...)`
   or inside quoted data defines nothing, so a definition moved into a comment is a
-  deletion, and the var goes. A bare `comment` counts as the comment form only at the
-  top level of a file that has not taken `comment` from clojure.core: inside a body a
-  local binding may shadow it, and a file may exclude or redefine it, and then the
-  forms inside run. When unsure, the definitions are kept.
+  deletion, and the var goes. Every call headed by `comment` (bare, or clojure.core's by
+  its full name or an alias) is the comment form, at any depth. A file that redefines
+  `comment` or binds it as a local is outside this rule: its definitions inside such a
+  call are unmapped, and the next reload that needs one fails loudly (No such var),
+  never with a false pass.
 
   Never remove-ns: defonce state, protocol vars and every var the file still defines
   keep their identity (compiled callers hold Var objects)."
@@ -80,39 +81,18 @@
          (or (= "clojure.core" q) (contains? aliases (symbol q)))
          true)))
 
-(defn- comment-shadowed?
-  "True when `form` is an ns form whose :refer-clojure clause may stop the bare symbol
-  `comment` meaning clojure.core/comment: any :only list, or `comment` named anywhere in
-  the clause (:exclude, :rename). Over-reports on purpose: a shadowed file keeps the
-  definitions inside its bare comment forms, which is the safe direction."
-  [form]
-  (and (seq? form) (= 'ns (first form))
-       (boolean
-        (some #(and (seq? %) (= :refer-clojure (first %))
-                    (or (some #{:only} %)
-                        (some #{'comment} (flatten (map (fn [x] (if (map? x) (seq x) x)) (rest %))))))
-              (rest form)))))
-
 (defn- definitions-in
   "Adds to `acc` every name the forms in `node` define, at any depth (including inside a
-  function body). Quoted data is not descended into, and neither is a comment form: a
-  `def` inside one is not a definition. A qualified head (`clojure.core/comment`, or
-  through an alias in `aliases`) is a comment form at any depth, since no local can
-  shadow a qualified symbol. A bare `comment` head is one only where `bare-comment?` is
-  true (the top level of a file that has not shadowed it, and the forms of a top-level
-  `do`, which Clojure compiles as top-level forms and which binds nothing): inside any
-  other body a `let` may bind `comment` to a function whose arguments run, so the
-  definitions are kept."
-  [{:keys [aliases bare-comment?] :as ctx} acc node]
+  function body). Quoted data is not descended into, and neither is a comment form (a
+  call headed by `comment`, bare or clojure.core's through `aliases`): a `def` inside
+  one is not a definition."
+  [aliases acc node]
   (if-not (coll? node)
     acc
-    (let [head (when (and (seq? node) (symbol? (first node))) (first node))
-          ctx (assoc ctx :bare-comment? (and bare-comment? (= 'do head)))]
-      (if (and head (or (and (core-form? head "comment" aliases)
-                             (or (namespace head) bare-comment?))
-                        (core-form? head "quote" aliases)))
+    (let [head (when (and (seq? node) (symbol? (first node))) (first node))]
+      (if (and head (or (core-form? head "comment" aliases) (core-form? head "quote" aliases)))
         acc
-        (reduce #(definitions-in ctx %1 %2)
+        (reduce #(definitions-in aliases %1 %2)
                 (if head
                   (let [nm (name head)]
                     (into acc (comp (filter symbol?) (map #(with-meta % nil)))
@@ -137,17 +117,8 @@
               forms (loop [acc []]
                       (let [form (read {:read-cond :allow :eof eof} reader)]
                         (if (identical? eof form) acc (recur (conj acc form)))))
-              aliases (into #{} (mapcat core-aliases) forms)
-              ;; Whole file, not form by form: a file whose ns form may stop `comment`
-              ;; meaning clojure.core's, or that defines its own `comment` anywhere
-              ;; (at any depth, before or after its uses), has no bare comment form.
-              ;; Order does not matter, so no ordering of forms can unmap a definition.
-              shadowed? (or (boolean (some comment-shadowed? forms))
-                            (contains? (reduce #(definitions-in {:aliases aliases :bare-comment? false} %1 %2)
-                                               #{} forms)
-                                       'comment))]
-          (reduce #(definitions-in {:aliases aliases :bare-comment? (not shadowed?)} %1 %2)
-                  #{} forms))))
+              aliases (into #{} (mapcat core-aliases) forms)]
+          (reduce #(definitions-in aliases %1 %2) #{} forms))))
     (catch Throwable _
       (binding [*out* *err*]
         (println (str "reload: cannot read source forms for " (ns-name ns) "; unmapping nothing")))
