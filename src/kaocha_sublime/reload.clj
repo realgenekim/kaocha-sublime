@@ -133,18 +133,21 @@
         ;; A unique object, never a value the file can contain: any sentinel that is
         ;; itself a readable form (a keyword, say) ends the scan early when the file
         ;; happens to contain it, and every definition after it is read as deleted.
-        (let [eof (Object.)]
-          (loop [names #{} aliases #{} shadowed? false]
-            (let [form (read {:read-cond :allow :eof eof} reader)]
-              (if (identical? eof form)
-                names
-                (let [aliases (into aliases (core-aliases form))
-                      ;; A file that defines its own `comment` shadows clojure.core's
-                      ;; from that form on (the definition may sit inside a body).
-                      shadowed? (or shadowed? (comment-shadowed? form) (contains? names 'comment))
-                      names (definitions-in {:aliases aliases :bare-comment? (not shadowed?)}
-                                            names form)]
-                  (recur names aliases (or shadowed? (contains? names 'comment))))))))))
+        (let [eof (Object.)
+              forms (loop [acc []]
+                      (let [form (read {:read-cond :allow :eof eof} reader)]
+                        (if (identical? eof form) acc (recur (conj acc form)))))
+              aliases (into #{} (mapcat core-aliases) forms)
+              ;; Whole file, not form by form: a file whose ns form may stop `comment`
+              ;; meaning clojure.core's, or that defines its own `comment` anywhere
+              ;; (at any depth, before or after its uses), has no bare comment form.
+              ;; Order does not matter, so no ordering of forms can unmap a definition.
+              shadowed? (or (boolean (some comment-shadowed? forms))
+                            (contains? (reduce #(definitions-in {:aliases aliases :bare-comment? false} %1 %2)
+                                               #{} forms)
+                                       'comment))]
+          (reduce #(definitions-in {:aliases aliases :bare-comment? (not shadowed?)} %1 %2)
+                  #{} forms))))
     (catch Throwable _
       (binding [*out* *err*]
         (println (str "reload: cannot read source forms for " (ns-name ns) "; unmapping nothing")))

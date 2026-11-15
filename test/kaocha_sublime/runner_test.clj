@@ -446,6 +446,19 @@
           (is (= :connected @(ns-resolve ns-sym 'client)) "client survives the reload"))))))
 
 ;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
+(deftest a-comment-defined-inside-a-top-level-do-keeps-the-definitions-its-calls-make
+  ;; Review round 6 (codex): the file's own comment, defined and called inside one
+  ;; top-level do, is an ordinary function, so start! defines client when it runs.
+  (with-source "(do (defn comment [x] x) (comment (defn start! [] (def client :connected))))"
+    (fn [ns-sym source]
+      ((ns-resolve ns-sym 'start!))
+      (is (= :connected @(ns-resolve ns-sym 'client)) "start! ran the def")
+      (let [before (reload/interned-meta ns-sym)]
+        (load-file (.getPath source))
+        (is (empty? (:unmapped (reload/unmap-stale! ns-sym before source))))
+        (is (= :connected @(ns-resolve ns-sym 'client)) "client survives the reload")))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest a-file-that-shadows-comment-keeps-the-definitions-inside-it
   (with-source "(defn start! [] (def client :connected))\n(def gone 1)"
     (fn [ns-sym source]
