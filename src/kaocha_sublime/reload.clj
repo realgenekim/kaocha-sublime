@@ -11,7 +11,10 @@
 
   Only code the file would evaluate names a definition: a form inside `(comment ...)`
   or inside quoted data defines nothing, so a definition moved into a comment is a
-  deletion, and the var goes.
+  deletion, and the var goes. A bare `comment` counts as the comment form only at the
+  top level of a file that has not taken `comment` from clojure.core: inside a body a
+  local binding may shadow it, and a file may exclude or redefine it, and then the
+  forms inside run. When unsure, the definitions are kept.
 
   Never remove-ns: defonce state, protocol vars and every var the file still defines
   keep their identity (compiled callers hold Var objects)."
@@ -77,18 +80,37 @@
          (or (= "clojure.core" q) (contains? aliases (symbol q)))
          true)))
 
+(defn- comment-shadowed?
+  "True when `form` is an ns form whose :refer-clojure clause may stop the bare symbol
+  `comment` meaning clojure.core/comment: any :only list, or `comment` named anywhere in
+  the clause (:exclude, :rename). Over-reports on purpose: a shadowed file keeps the
+  definitions inside its bare comment forms, which is the safe direction."
+  [form]
+  (and (seq? form) (= 'ns (first form))
+       (boolean
+        (some #(and (seq? %) (= :refer-clojure (first %))
+                    (or (some #{:only} %)
+                        (some #{'comment} (flatten (map (fn [x] (if (map? x) (seq x) x)) (rest %))))))
+              (rest form)))))
+
 (defn- definitions-in
   "Adds to `acc` every name the forms in `node` define, at any depth (including inside a
-  function body). A `comment` form and quoted data are not descended into: they
-  evaluate to nothing, so a `def` inside one is not a definition. `aliases` are the
-  file's aliases for clojure.core (`core-aliases`)."
-  [aliases acc node]
+  function body). Quoted data is not descended into, and neither is a comment form: a
+  `def` inside one is not a definition. A qualified head (`clojure.core/comment`, or
+  through an alias in `aliases`) is a comment form at any depth, since no local can
+  shadow a qualified symbol. A bare `comment` head is one only where `bare-comment?` is
+  true (the top level of a file that has not shadowed it): inside a body a `let` may
+  bind `comment` to a function whose arguments run, so the definitions are kept."
+  [{:keys [aliases bare-comment?] :as ctx} acc node]
   (if-not (coll? node)
     acc
-    (let [head (when (and (seq? node) (symbol? (first node))) (first node))]
-      (if (and head (or (core-form? head "comment" aliases) (core-form? head "quote" aliases)))
+    (let [head (when (and (seq? node) (symbol? (first node))) (first node))
+          ctx (assoc ctx :bare-comment? false)]
+      (if (and head (or (and (core-form? head "comment" aliases)
+                             (or (namespace head) bare-comment?))
+                        (core-form? head "quote" aliases)))
         acc
-        (reduce #(definitions-in aliases %1 %2)
+        (reduce #(definitions-in ctx %1 %2)
                 (if head
                   (let [nm (name head)]
                     (into acc (comp (filter symbol?) (map #(with-meta % nil)))
@@ -110,12 +132,17 @@
         ;; itself a readable form (a keyword, say) ends the scan early when the file
         ;; happens to contain it, and every definition after it is read as deleted.
         (let [eof (Object.)]
-          (loop [names #{} aliases #{}]
+          (loop [names #{} aliases #{} shadowed? false]
             (let [form (read {:read-cond :allow :eof eof} reader)]
               (if (identical? eof form)
                 names
-                (let [aliases (into aliases (core-aliases form))]
-                  (recur (definitions-in aliases names form) aliases))))))))
+                (let [aliases (into aliases (core-aliases form))
+                      ;; A file that defines its own `comment` shadows clojure.core's
+                      ;; from that form on (the definition may sit inside a body).
+                      shadowed? (or shadowed? (comment-shadowed? form) (contains? names 'comment))
+                      names (definitions-in {:aliases aliases :bare-comment? (not shadowed?)}
+                                            names form)]
+                  (recur names aliases (or shadowed? (contains? names 'comment))))))))))
     (catch Throwable _
       (binding [*out* *err*]
         (println (str "reload: cannot read source forms for " (ns-name ns) "; unmapping nothing")))

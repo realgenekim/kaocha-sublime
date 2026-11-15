@@ -429,6 +429,40 @@
               "an alias the file gives clojure.core resolves to it"))))))
 
 ;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
+(deftest a-locally-shadowed-comment-runs-its-body-and-keeps-the-definition
+  ;; Review round 4 (codex): (let [comment identity] (comment (def client ...))) runs the
+  ;; def. Treating that bare comment as clojure.core's unmapped client after start! ran,
+  ;; and the next dependent reload failed with No such var.
+  (let [src "(defn start! [] (let [comment identity] (comment (def client :connected))))"]
+    (with-source src
+      (fn [ns-sym source]
+        ((ns-resolve ns-sym 'start!))
+        (is (= :connected @(ns-resolve ns-sym 'client)) "start! ran the def")
+        (let [before (reload/interned-meta ns-sym)]
+          (load-file (.getPath source))
+          (let [r (reload/unmap-stale! ns-sym before source)]
+            (is (empty? (:unmapped r)))
+            (is (some #(and (= 'client (:var %)) (= :still-in-file (:reason %))) (:kept r))))
+          (is (= :connected @(ns-resolve ns-sym 'client)) "client survives the reload"))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
+(deftest a-file-that-shadows-comment-keeps-the-definitions-inside-it
+  (with-source "(defn start! [] (def client :connected))\n(def gone 1)"
+    (fn [ns-sym source]
+      ((ns-resolve ns-sym 'start!))
+      (let [before (reload/interned-meta ns-sym)]
+        ;; :refer-clojure :exclude [comment] plus the file's own comment function.
+        (spit source (str "(ns " ns-sym " (:refer-clojure :exclude [comment]))\n"
+                          "(defn comment [& xs] xs)\n"
+                          "(comment (defn start! [] (def client :connected)))\n"
+                          "(clojure.core/comment (def gone 1))\n"))
+        (let [r (reload/unmap-stale! ns-sym before source)]
+          (is (= '[gone] (mapv :var (:unmapped r)))
+              "clojure.core/comment by its full name is still the comment form")
+          (is (= '[client start!] (sort (mapv :var (:kept r))))
+              "the bare comment is the file's own function, so its body defines"))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest an-unreadable-file-unmaps-nothing
   (with-source "(def one 1) (def two 2)"
     (fn [ns-sym source]
