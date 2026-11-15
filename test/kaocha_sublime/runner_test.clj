@@ -393,6 +393,60 @@
           (is (every? #(nil? (ns-resolve ns-sym %)) '[deleted-test gone also-gone])))))))
 
 ;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
+(deftest a-form-that-looks-like-the-readers-eof-sentinel-does-not-end-the-scan
+  ;; ::eof read in kaocha-sublime.reload is the keyword below, an ordinary form any
+  ;; file may contain; as a sentinel it would stop the scan at line 1 and report every
+  ;; definition after it as deleted.
+  (with-source "(defn start! [] (def client :connected))"
+    (fn [ns-sym source]
+      ((ns-resolve ns-sym 'start!))      ; so the inner def's var carries this file's :file
+      (let [before (reload/interned-meta ns-sym)]
+        (spit source ":kaocha-sublime.reload/eof\n(defn start! [] (def client :connected))\n")
+        (let [r (reload/unmap-stale! ns-sym before source)]
+          (is (empty? (:unmapped r)) "the scan reads past it and sees the whole file")
+          (is (= '[client start!] (sort (mapv :var (:kept r)))))
+          (is (every? #(= :still-in-file (:reason %)) (:kept r))))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
+(deftest only-clojure-cores-comment-is-a-comment-form
+  (with-source "(defn start! [] (def client :connected))\n(def gone 1)"
+    (fn [ns-sym source]
+      ((ns-resolve ns-sym 'start!))      ; so the inner def's var carries this file's :file
+      (let [before (reload/interned-meta ns-sym)]
+        (spit source (str "(helper/comment (defn start! [] (def client :connected)))\n"
+                          "(clojure.core/comment (def gone 1))\n"))
+        (let [r (reload/unmap-stale! ns-sym before source)]
+          (is (= '[gone] (mapv :var (:unmapped r)))
+              "clojure.core/comment is the comment form, by its own name")
+          (is (= '[client start!] (sort (mapv :var (:kept r))))
+              "helper/comment is an ordinary function that evaluates its arguments")
+          (is (every? #(= :still-in-file (:reason %)) (:kept r))))
+        ;; An ns form that aliases clojure.core: through that alias it IS the comment form.
+        (spit source (str "(ns " ns-sym " (:require [clojure.core :as core]))\n"
+                          "(core/comment (defn start! [] (def client :connected)))\n"))
+        (let [r (reload/unmap-stale! ns-sym before source)]
+          (is (= '[client start!] (sort (mapv :var (:unmapped r))))
+              "an alias the file gives clojure.core resolves to it"))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
+(deftest a-redefined-comment-is-still-read-as-the-comment-form
+  ;; The documented limit (Gene, 2026-11-15, after review rounds 4-7 on shadowing): every
+  ;; call headed by comment is the comment form. A file that redefines comment loses the
+  ;; definitions its calls would make, loudly on the next reload that needs them; a
+  ;; commented-out definition is never kept, whatever else the file defines.
+  (with-source "(defn start! [] (def client :connected))\n(def gone 1)"
+    (fn [ns-sym source]
+      (let [before (reload/interned-meta ns-sym)]
+        (spit source (str "(ns " ns-sym " (:refer-clojure :exclude [comment]))\n"
+                          "(comment (defn comment [x] x))\n"
+                          "(do (defn comment [& xs] xs) (comment (defn start! [] (def client :connected))))\n"
+                          "(comment (def gone 1))\n"))
+        (let [r (reload/unmap-stale! ns-sym before source)]
+          (is (= '[gone start!] (sort (mapv :var (:unmapped r))))
+              "definitions inside comment calls are not definitions, redefined comment or not")
+          (is (not-any? #(= 'start! (:var %)) (:kept r))))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
 (deftest an-unreadable-file-unmaps-nothing
   (with-source "(def one 1) (def two 2)"
     (fn [ns-sym source]
@@ -549,3 +603,47 @@
         (load-file (.getPath source))
         (is (= '[gone] (mapv :var (:unmapped (reload/unmap-stale! ns-sym before source)))))
         (is (nil? (ns-resolve ns-sym 'gone)))))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
+(deftest a-commented-out-test-is-not-run-or-counted-by-a-warm-check
+  ;; The whole path a warm check takes, not the unmap function alone: a transient test
+  ;; namespace under test/ (deleted in finally, so no suite run ever discovers it) is
+  ;; checked twice through runner/check!, with a real nested Kaocha run each time. The
+  ;; nested run gets its own report counters, as a probe's run does, so the enclosing
+  ;; suite's counts are untouched.
+  (let [f (io/file "test/kaocha_sublime/comment_probe_test.clj")
+        ns-sym 'kaocha-sublime.comment-probe-test
+        header (str "(ns " ns-sym " (:require [clojure.test :refer [deftest is]]))\n"
+                    "(deftest anchor (is true))\n")
+        check! (fn []
+                 (let [answer (atom nil)]
+                   (with-out-str
+                     (binding [clojure.test/*test-out* *out* clojure.test/*report-counters* nil]
+                       (reset! answer (runner/check! [(str ns-sym)]))))
+                   @answer))]
+    (try
+      (spit f (str header "(deftest commented-out (is true))\n"))
+      (let [r (check!)]
+        (is (= "pass" (:status r)) (:error r))
+        (is (= 2 (get-in r [:counts :tests])) "both tests ran"))
+      (spit f (str header "(comment (deftest commented-out (is true)))\n"))
+      (let [r (check!)]
+        (is (= "pass" (:status r)) (:error r))
+        (is (= 1 (get-in r [:counts :tests]))
+            "the commented-out test is neither executed nor counted, as in a cold JVM")
+        (is (some #(= "commented-out" (:var %)) (:unmapped r))
+            "and the receipt says the reload unmapped it")
+        (is (nil? (ns-resolve ns-sym 'commented-out))))
+      ;; Review round 5 (codex): a bare comment inside a top-level do is still the comment
+      ;; form, so the test it wraps is gone in a cold JVM and must be gone warm too.
+      (spit f (str header "(deftest commented-out (is true))\n"))
+      (is (= 2 (get-in (check!) [:counts :tests])) "the test is back")
+      (spit f (str header "(do (comment (deftest commented-out (is true))))\n"))
+      (let [r (check!)]
+        (is (= "pass" (:status r)) (:error r))
+        (is (= 1 (get-in r [:counts :tests]))
+            "a test commented out inside a top-level do is not counted either")
+        (is (nil? (ns-resolve ns-sym 'commented-out))))
+      (finally
+        (.delete f)
+        (remove-ns ns-sym)))))

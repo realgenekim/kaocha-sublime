@@ -11,7 +11,11 @@
 
   Only code the file would evaluate names a definition: a form inside `(comment ...)`
   or inside quoted data defines nothing, so a definition moved into a comment is a
-  deletion, and the var goes.
+  deletion, and the var goes. Every call headed by `comment` (bare, or clojure.core's by
+  its full name or an alias) is the comment form, at any depth. A file that redefines
+  `comment` or binds it as a local is outside this rule: its definitions inside such a
+  call are unmapped, and the next reload that needs one fails loudly (No such var),
+  never with a false pass.
 
   Never remove-ns: defonce state, protocol vars and every var the file still defines
   keep their identity (compiled callers hold Var objects)."
@@ -46,22 +50,55 @@
              (or (= path rel)
                  (.endsWith (.replace path \\ \/) (str "/" rel)))))))
 
+(defn- core-aliases
+  "The alias symbols a file's `ns` form gives to clojure.core, read from simple
+  `[clojure.core :as c]` / `[clojure.core :as-alias c]` require specs, so that
+  `c/comment` can be recognised as `clojure.core/comment`. Any other shape (a prefix
+  list, a spec the reader does not hand us as a literal) contributes nothing, which
+  leaves a qualified head unresolved and therefore not a comment: the direction that
+  keeps the var. `:refer-clojure` is not read - it changes which clojure.core names are
+  referred, not what clojure.core is aliased to."
+  [form]
+  (when (and (seq? form) (= 'ns (first form)))
+    (into #{}
+          (comp (filter #(and (seq? %) (= :require (first %))))
+                (mapcat rest)
+                (filter #(and (sequential? %) (= 'clojure.core (first %)) (odd? (count %))))
+                (map #(apply hash-map (rest %)))
+                (keep #(or (:as %) (:as-alias %)))
+                (filter simple-symbol?))
+          (rest form))))
+
+(defn- core-form?
+  "True when `head` names clojure.core's `n`: the bare symbol, `clojure.core/n`, or
+  `<alias>/n` for an alias the file gives clojure.core (`aliases`). A qualified head
+  whose namespace is not known to be clojure.core is some other function - a project's
+  own `helper/comment` evaluates its arguments - so it is not this form, and a `def`
+  inside it is a definition, which is the direction that keeps the var."
+  [head n aliases]
+  (and (= n (name head))
+       (if-let [q (namespace head)]
+         (or (= "clojure.core" q) (contains? aliases (symbol q)))
+         true)))
+
 (defn- definitions-in
   "Adds to `acc` every name the forms in `node` define, at any depth (including inside a
-  function body). A `comment` form and quoted data are not descended into: they
-  evaluate to nothing, so a `def` inside one is not a definition."
-  [acc node]
+  function body). Quoted data is not descended into, and neither is a comment form (a
+  call headed by `comment`, bare or clojure.core's through `aliases`): a `def` inside
+  one is not a definition."
+  [aliases acc node]
   (if-not (coll? node)
     acc
-    (let [head (when (and (seq? node) (symbol? (first node))) (name (first node)))]
-      (if (or (= head "comment") (= head "quote"))
+    (let [head (when (and (seq? node) (symbol? (first node))) (first node))]
+      (if (and head (or (core-form? head "comment" aliases) (core-form? head "quote" aliases)))
         acc
-        (reduce definitions-in
+        (reduce #(definitions-in aliases %1 %2)
                 (if head
-                  (into acc (comp (filter symbol?) (map #(with-meta % nil)))
-                        (cond
-                          (= head "declare") (rest node)
-                          (.startsWith head "def") [(second node)]))
+                  (let [nm (name head)]
+                    (into acc (comp (filter symbol?) (map #(with-meta % nil)))
+                          (cond
+                            (= nm "declare") (rest node)
+                            (.startsWith nm "def") [(second node)])))
                   acc)
                 (seq node))))))
 
@@ -73,11 +110,15 @@
   (try
     (binding [*read-eval* false *ns* ns]
       (with-open [reader (java.io.PushbackReader. (io/reader source))]
-        (loop [names #{}]
-          (let [form (read {:read-cond :allow :eof ::eof} reader)]
-            (if (= ::eof form)
-              names
-              (recur (definitions-in names form)))))))
+        ;; A unique object, never a value the file can contain: any sentinel that is
+        ;; itself a readable form (a keyword, say) ends the scan early when the file
+        ;; happens to contain it, and every definition after it is read as deleted.
+        (let [eof (Object.)
+              forms (loop [acc []]
+                      (let [form (read {:read-cond :allow :eof eof} reader)]
+                        (if (identical? eof form) acc (recur (conj acc form)))))
+              aliases (into #{} (mapcat core-aliases) forms)]
+          (reduce #(definitions-in aliases %1 %2) #{} forms))))
     (catch Throwable _
       (binding [*out* *err*]
         (println (str "reload: cannot read source forms for " (ns-name ns) "; unmapping nothing")))
