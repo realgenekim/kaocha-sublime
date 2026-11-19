@@ -272,7 +272,10 @@ docs/SETUP.md section 7.
 A repo needs no alias for the library. An optional `:sublime` alias carries only
 project extras (for example `:extra-paths ["dev"]`); see docs/SETUP.md. `bin/warm-jvm`
 (= `up`) and `bin/test-focus` (= `check`, with a loud `COLD START` restart) wrap the
-CLI. Optional Makefile lines:
+CLI. `warm-jvm` requires `--root DIR`; bare `test-focus` uses the current directory
+only when it has a recorded warm JVM. `--help` or `-h` prints usage
+without contacting a JVM. For example, `bin/warm-jvm --root .` and
+`bin/test-focus --root . my.app.core-test`. Optional Makefile lines:
 
 ```make
 sublime-up: ; $(SUBLIME_LOOP) --root . up
