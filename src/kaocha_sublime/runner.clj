@@ -340,7 +340,8 @@
         ;; on a check that unmapped nothing.
         suspects (into (set (map :ns (concat (:unmapped loaded) (:kept loaded))))
                        (map (comp symbol :ns) rejected))
-        refers (stale/refer-mismatches (filterv suspects targets) files (set (map :var-object (:kept loaded))))
+        refers (stale/refer-mismatches (filterv suspects targets) files
+                 (set (map :var-object (remove :reason (:kept loaded)))))
         unmapped-at (into {} (map (fn [e] [[(:ns e) (:var e)] (:at (unmapped-entry e))])) (:unmapped loaded))
         refers (mapv (fn [e]
                        (let [said (some #(when (and (= (:ns %) (str (:ns e))) (= (:kept %) (str (:ns e) "/" (:sym e))))
@@ -431,7 +432,7 @@
         final (if repair (or (:recheck repair) {:refers [] :referrers []}) first-pass)
         loaded (if repair (:loaded repair) loaded)
         defs (vec (concat (map #(assoc (unmapped-entry %) :unmapped true) (:unmapped loaded))
-                          (map #(assoc (unmapped-entry %) :unmapped false) (:kept loaded))))
+                          (map #(assoc (unmapped-entry %) :unmapped false) (remove :reason (:kept loaded)))))
         check-ms (/ (Math/round (/ (double (+ check-nanos (:nanos loaded))) 1e4)) 100.0)
         report (->> [:refers (mapv refer-data (:refers final))
                      :referrers (mapv referrer-data (:referrers final))
@@ -598,6 +599,9 @@
                reload-error (:error loaded)
                base (cond-> base
                       (seq (:unmapped loaded)) (assoc :unmapped (mapv unmapped-entry (:unmapped loaded)))
+                      (seq (:kept loaded)) (assoc :kept (mapv #(cond-> (unmapped-entry %)
+                                                                 (:reason %) (assoc :reason (name (:reason %))))
+                                                          (:kept loaded)))
                       (:report image) (assoc :stale (:report image)))]
            (cond
              reload-error

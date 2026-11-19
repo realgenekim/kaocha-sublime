@@ -6,6 +6,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [kaocha-sublime.reload :as reload]
             [kaocha-sublime.runner :as runner]
             [kaocha-sublime.stale :as stale]))
 
@@ -171,6 +172,35 @@
     (let [r (check 'kaocha-sublime.stale-core)]
       (is (= "focus" (:stage r)))
       (is (empty? (get-in r [:stale :refers]))))
+    (finally (cleanup!))))
+
+;; INTENT-TEST: LOOP-RELOAD-UNMAP-018
+(deftest a-local-definition-inside-a-function-body-is-not-a-stale-refer
+  ;; The keep the refer check must not be told about: a definition the file still has,
+  ;; inside a body the reload did not run, so the reload kept it with a reason. Cold:
+  ;; refer, then the def replaces it. Warm: REJECTED, then the same local var stands.
+  (try
+    (write! :home home-v2)
+    (write! :core (str "(ns kaocha-sublime.stale-core (:require [kaocha-sublime.stale-home :refer [render]]))\n"
+                       "(defn start! [] (def render (fn [] :local)))\n"))
+    (binding [*err* (java.io.StringWriter.)] (require 'kaocha-sublime.stale-home 'kaocha-sublime.stale-core))
+    ((resolve 'kaocha-sublime.stale-core/start!))
+    (let [r (check 'kaocha-sublime.stale-core)]
+      (is (= "focus" (:stage r)) "a kept local definition is not a stale image")
+      (is (empty? (get-in r [:stale :refers]))))
+    (let [loaded (binding [*err* (java.io.StringWriter.)]
+                   (reload/reload! 'kaocha-sublime.stale-core (files :core)))
+          stale-own #(set (map :var-object %))
+          mismatches #(stale/refer-mismatches ['kaocha-sublime.stale-core]
+                                              {'kaocha-sublime.stale-core (files :core)} %)]
+      (is (= '[[render :still-in-file]] (mapv (juxt :var :reason) (:kept loaded)))
+          "the reload kept the local var because the file still names it")
+      (is (empty? (:unmapped loaded)))
+      (is (empty? (mismatches (stale-own (remove :reason (:kept loaded)))))
+          "a reasoned keep is not stale-own, so the refused refer is not a mismatch")
+      (is (= [{:ns 'kaocha-sublime.stale-core :sym 'render :class "refused"}]
+             (mapv #(select-keys % [:ns :sym :class]) (mismatches (stale-own (:kept loaded)))))
+          "and it matters: counting a still-in-file keep as stale-own invents a refused refer"))
     (finally (cleanup!))))
 
 ;; INTENT-TEST: LOOP-STALE-REFER-011
